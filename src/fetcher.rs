@@ -1,0 +1,729 @@
+// Copyright 2026 The Sashiko Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use crate::events::Event;
+use crate::utils::redact_secret;
+use anyhow::{Result, anyhow};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use tokio::process::Command;
+use tokio::sync::mpsc;
+use tokio::time::{Duration, interval};
+use tracing::{error, info, warn};
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FetchRequest {
+    pub repo_url: Option<String>,
+    pub commit_hash: String,
+}
+
+pub struct FetchAgent {
+    repo_path: PathBuf,
+    rx: mpsc::Receiver<FetchRequest>,
+    main_tx: mpsc::Sender<Event>,
+}
+
+impl FetchAgent {
+    pub fn new(
+        repo_path: PathBuf,
+        main_tx: mpsc::Sender<Event>,
+    ) -> (Self, mpsc::Sender<FetchRequest>) {
+        let (tx, rx) = mpsc::channel(100);
+        (
+            Self {
+                repo_path,
+                rx,
+                main_tx,
+            },
+            tx,
+        )
+    }
+
+    pub async fn run(mut self) {
+        info!("FetchAgent started");
+        let mut queue: HashMap<Option<String>, HashSet<String>> = HashMap::new();
+        let mut ticker = interval(Duration::from_secs(10));
+
+        loop {
+            tokio::select! {
+                Some(req) = self.rx.recv() => {
+                    queue.entry(req.repo_url)
+                        .or_default()
+                        .insert(req.commit_hash);
+                }
+                _ = ticker.tick() => {
+                    if !queue.is_empty() {
+                        self.process_queue(&mut queue).await;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn process_queue(&self, queue: &mut HashMap<Option<String>, HashSet<String>>) {
+        info!("Processing fetch queue with {} repos", queue.len());
+
+        for (url_opt, commits) in queue.drain() {
+            if commits.is_empty() {
+                continue;
+            }
+
+            let commit_list: Vec<String> = commits.into_iter().collect();
+            let url_display = url_opt.as_deref().unwrap_or("local");
+
+            info!(
+                "Processing {} commits for remote {}",
+                commit_list.len(),
+                url_display
+            );
+
+            let effective_repo_path = self.effective_repo_path(url_opt.as_deref());
+
+            // Check existence first
+            let mut missing_commits = Vec::new();
+            for commit in &commit_list {
+                if !self.is_present_in(&effective_repo_path, commit).await {
+                    missing_commits.push(commit.clone());
+                }
+            }
+
+            if missing_commits.is_empty() {
+                info!(
+                    "All commits present locally, skipping fetch for {}",
+                    url_display
+                );
+            } else if let Some(url) = url_opt.as_deref() {
+                // Remote fetch logic
+                let remote_name = self.get_remote_name(&url);
+
+                // Check if repo is local (same as self.repo_path)
+                let is_local = {
+                    let url_path = PathBuf::from(&url);
+                    if let (Ok(canon_url), Ok(canon_repo)) = (
+                        std::fs::canonicalize(&url_path),
+                        std::fs::canonicalize(&self.repo_path),
+                    ) {
+                        canon_url == canon_repo
+                    } else {
+                        false
+                    }
+                };
+
+                if is_local {
+                    warn!(
+                        "Repository is local but commits are missing: {:?}. Cannot fetch.",
+                        missing_commits
+                    );
+                    // Do not continue here; let it fall through to Step 3 where it will fail individually
+                } else {
+                    if let Err(e) = self.ensure_remote(&remote_name, &url).await {
+                        error!("Failed to ensure remote {}: {}", url, e);
+                        for commit in &missing_commits {
+                            let _ = self
+                                .main_tx
+                                .send(Event::IngestionFailed {
+                                    article_id: commit.clone(),
+                                    error: format!("Failed to set up remote {}: {}", url, e),
+                                })
+                                .await;
+                        }
+                        continue;
+                    }
+
+                    // 1. Try optimistic fetch (fetch specific commits)
+                    if let Err(e) = self.fetch_commits(&remote_name, &missing_commits).await {
+                        warn!(
+                            "Optimistic fetch failed for {}: {}. Falling back to full fetch.",
+                            url, e
+                        );
+                        // 2. Fallback: Fetch everything (heads)
+                        if let Err(e) = self.fetch_all(&remote_name).await {
+                            error!("Full fetch failed for {}: {}", url, e);
+                            for commit in &missing_commits {
+                                let _ = self
+                                    .main_tx
+                                    .send(Event::IngestionFailed {
+                                        article_id: commit.clone(),
+                                        error: format!("Failed to fetch from {}: {}", url, e),
+                                    })
+                                    .await;
+                            }
+                            continue;
+                        }
+                    }
+                }
+            } else {
+                // Local repo, but commits are missing
+                warn!(
+                    "Local repository missing commits: {:?}. Cannot fetch.",
+                    missing_commits
+                );
+            }
+
+            // 3. Process each commit or range
+            for commit_or_range in commit_list {
+                if commit_or_range.contains("..") {
+                    // It's a range
+                    let range = &commit_or_range;
+
+                    let shas = match crate::git_ops::resolve_git_range(&effective_repo_path, range)
+                        .await
+                    {
+                        Ok(shas) => shas,
+                        Err(e) => {
+                            let _ = self
+                                .main_tx
+                                .send(Event::IngestionFailed {
+                                    article_id: range.clone(),
+                                    error: format!("Failed to resolve git range: {}", e),
+                                })
+                                .await;
+                            continue;
+                        }
+                    };
+                    let count = shas.len() as u32;
+
+                    if count == 0 {
+                        let _ = self
+                            .main_tx
+                            .send(Event::IngestionFailed {
+                                article_id: range.clone(),
+                                error: "Git range is empty".to_string(),
+                            })
+                            .await;
+                        continue;
+                    }
+
+                    // Process each SHA
+                    for (i, sha) in shas.iter().enumerate() {
+                        match self
+                            .extract_patch_from_repo(
+                                &effective_repo_path,
+                                url_opt.as_deref(),
+                                sha,
+                                range,
+                                (i + 1) as u32,
+                                count,
+                            )
+                            .await
+                        {
+                            Ok(mut event) => {
+                                if let Event::PatchSubmitted {
+                                    ref mut message_id, ..
+                                } = event
+                                {
+                                    *message_id = sha.clone();
+                                }
+                                if let Err(e) = self.main_tx.send(event).await {
+                                    error!("Failed to send PatchSubmitted event: {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Failed to extract patch {} from range {}: {}",
+                                    sha, range, e
+                                );
+                            }
+                        }
+                    }
+                    info!("Successfully submitted remote range {}", range);
+                } else {
+                    // Single commit
+                    let full_sha = match self
+                        .resolve_sha_in(&effective_repo_path, &commit_or_range)
+                        .await
+                    {
+                        Ok(sha) => sha,
+                        Err(e) => {
+                            let _ = self
+                                .main_tx
+                                .send(Event::IngestionFailed {
+                                    article_id: commit_or_range.clone(),
+                                    error: format!("Failed to resolve SHA: {}", e),
+                                })
+                                .await;
+                            continue;
+                        }
+                    };
+
+                    match self
+                        .extract_patch_from_repo(
+                            &effective_repo_path,
+                            url_opt.as_deref(),
+                            &full_sha,
+                            &commit_or_range,
+                            1,
+                            1,
+                        )
+                        .await
+                    {
+                        Ok(mut event) => {
+                            if let Event::PatchSubmitted {
+                                ref mut message_id, ..
+                            } = event
+                            {
+                                *message_id = full_sha.clone();
+                            }
+                            if let Err(e) = self.main_tx.send(event).await {
+                                error!("Failed to send PatchSubmitted event: {}", e);
+                            } else {
+                                info!("Successfully submitted remote patch {}", commit_or_range);
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to extract patch {}: {}", commit_or_range, e);
+                            let _ = self
+                                .main_tx
+                                .send(Event::IngestionFailed {
+                                    article_id: commit_or_range,
+                                    error: format!("Failed to extract patch: {}", e),
+                                })
+                                .await;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn get_remote_name(&self, url: &str) -> String {
+        // Use a hash of the URL to ensure safe and unique remote names
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        url.hash(&mut hasher);
+        format!("fetcher-{:x}", hasher.finish())
+    }
+
+    fn effective_repo_path(&self, repo_url: Option<&str>) -> PathBuf {
+        repo_url
+            .map(PathBuf::from)
+            .filter(|path| path.exists())
+            .unwrap_or_else(|| self.repo_path.clone())
+    }
+
+    async fn ensure_remote(&self, name: &str, url: &str) -> Result<()> {
+        // Check if remote exists
+        let status = Command::new("git")
+            .current_dir(&self.repo_path)
+            .args(["remote", "get-url", name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await?;
+
+        if status.success() {
+            // Check if URL matches, if not update it
+            let output = Command::new("git")
+                .current_dir(&self.repo_path)
+                .args(["remote", "get-url", name])
+                .output()
+                .await?;
+            let current_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+            if current_url != url {
+                info!(
+                    "Updating remote {} from {} to {}",
+                    name,
+                    redact_secret(&current_url),
+                    redact_secret(url)
+                );
+                Command::new("git")
+                    .current_dir(&self.repo_path)
+                    .args(["remote", "set-url", name, url])
+                    .output()
+                    .await?;
+            }
+        } else {
+            info!("Adding remote {} -> {}", name, redact_secret(url));
+            let output = Command::new("git")
+                .current_dir(&self.repo_path)
+                .args(["remote", "add", name, url])
+                .output()
+                .await?;
+
+            if !output.status.success() {
+                return Err(anyhow!(
+                    "Failed to add remote: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    async fn fetch_commits(&self, remote: &str, commits: &[String]) -> Result<()> {
+        let mut cmd = Command::new("git");
+        cmd.current_dir(&self.repo_path)
+            .args(crate::git_ops::GIT_PROTOCOL_RESTRICTIONS)
+            .arg("fetch")
+            .arg(remote);
+
+        for commit in commits {
+            cmd.arg(commit);
+        }
+
+        let output = cmd.output().await?;
+        if !output.status.success() {
+            return Err(anyhow!(
+                "Fetch failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(())
+    }
+
+    async fn fetch_all(&self, remote: &str) -> Result<()> {
+        let output = Command::new("git")
+            .current_dir(&self.repo_path)
+            .args(crate::git_ops::GIT_PROTOCOL_RESTRICTIONS)
+            .args(["fetch", remote])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            return Err(anyhow!(
+                "Fetch all failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    async fn is_present(&self, commit_or_range: &str) -> bool {
+        self.is_present_in(&self.repo_path, commit_or_range).await
+    }
+
+    async fn is_present_in(&self, repo_path: &Path, commit_or_range: &str) -> bool {
+        let arg_str: String;
+        let args = if let Some((start, end)) = commit_or_range.split_once("..") {
+            // For ranges, ensure both endpoints are commits
+            arg_str = format!("{}^{{commit}}..{}^{{commit}}", start, end);
+            vec!["rev-list", "-n", "1", &arg_str]
+        } else {
+            // For single commits, ensure it is a valid commit object
+            arg_str = format!("{}^{{commit}}", commit_or_range);
+            vec!["rev-parse", "--verify", &arg_str]
+        };
+
+        let output = Command::new("git")
+            .current_dir(repo_path)
+            .args(&args)
+            .output()
+            .await;
+
+        match output {
+            Ok(s) => {
+                let success = s.status.success();
+                if success {
+                    info!("is_present: {} is present", commit_or_range);
+                } else {
+                    info!(
+                        "is_present: {} is missing or not a commit. stderr: {}",
+                        commit_or_range,
+                        String::from_utf8_lossy(&s.stderr)
+                    );
+                }
+                success
+            }
+            Err(e) => {
+                error!("is_present: {} check failed: {}", commit_or_range, e);
+                false
+            }
+        }
+    }
+
+    async fn resolve_sha_in(&self, repo_path: &Path, commit: &str) -> Result<String> {
+        let output = Command::new("git")
+            .current_dir(repo_path)
+            .args(["rev-parse", "--verify", commit])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            return Err(anyhow!(
+                "Failed to resolve SHA for {}: {}",
+                commit,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    #[cfg(test)]
+    async fn extract_patch(
+        &self,
+        commit: &str,
+        article_id: &str,
+        index: u32,
+        total: u32,
+    ) -> Result<Event> {
+        self.extract_patch_from_repo(&self.repo_path, None, commit, article_id, index, total)
+            .await
+    }
+
+    async fn extract_patch_from_repo(
+        &self,
+        repo_path: &Path,
+        repo_url: Option<&str>,
+        commit: &str,
+        article_id: &str,
+        index: u32,
+        total: u32,
+    ) -> Result<Event> {
+        let meta = crate::git_ops::extract_patch_metadata(repo_path, commit).await?;
+
+        Ok(Event::PatchSubmitted {
+            group: "git-fetch".to_string(),
+            article_id: article_id.to_string(),
+            repo_url: repo_url.map(ToString::to_string),
+            message_id: String::new(), // Set by caller
+            subject: meta.subject,
+            author: meta.author,
+            message: meta.message,
+            diff: meta.diff,
+            base_commit: meta.base_commit,
+            timestamp: meta.timestamp,
+            index,
+            total,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write;
+
+    #[tokio::test]
+    async fn test_fetch_agent_lifecycle() {
+        let (tx, _rx) = mpsc::channel(1);
+        let repo_path = PathBuf::from("/tmp");
+        let (_agent, _sender) = FetchAgent::new(repo_path, tx);
+    }
+
+    #[tokio::test]
+    async fn test_extract_patch_parsing() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let repo_path = temp_dir.path().to_path_buf();
+
+        // Setup dummy repo
+        Command::new("git")
+            .current_dir(&repo_path)
+            .arg("init")
+            .output()
+            .await?;
+        Command::new("git")
+            .current_dir(&repo_path)
+            .args(["config", "user.name", "Test User"])
+            .output()
+            .await?;
+        Command::new("git")
+            .current_dir(&repo_path)
+            .args(["config", "user.email", "test@example.com"])
+            .output()
+            .await?;
+
+        let file_path = repo_path.join("file.txt");
+        let mut file = File::create(&file_path)?;
+        writeln!(file, "content")?;
+
+        Command::new("git")
+            .current_dir(&repo_path)
+            .args(["add", "."])
+            .output()
+            .await?;
+        Command::new("git")
+            .current_dir(&repo_path)
+            .args(["commit", "-m", "Subject Line\n\nBody Line"])
+            .output()
+            .await?;
+
+        let (tx, _rx) = mpsc::channel(1);
+        let (agent, _) = FetchAgent::new(repo_path.clone(), tx);
+
+        let output = Command::new("git")
+            .current_dir(&repo_path)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .await?;
+        let head = String::from_utf8(output.stdout)?.trim().to_string();
+
+        let event = agent.extract_patch(&head, &head, 1, 1).await?;
+
+        match event {
+            Event::PatchSubmitted {
+                subject,
+                author,
+                message,
+                diff,
+                article_id,
+                ..
+            } => {
+                assert_eq!(subject, "Subject Line");
+                assert_eq!(author, "Test User <test@example.com>");
+                assert!(message.contains("Body Line"));
+                assert!(diff.contains("diff --git"));
+                assert_eq!(article_id, head);
+            }
+            _ => panic!("Wrong event type"),
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_process_queue_uses_local_repo_url_for_remote_submission() -> Result<()> {
+        let cache_dir = tempfile::tempdir()?;
+        let cache_repo = cache_dir.path().to_path_buf();
+        let source_dir = tempfile::tempdir()?;
+        let source_repo = source_dir.path().to_path_buf();
+
+        for repo in [&cache_repo, &source_repo] {
+            Command::new("git")
+                .current_dir(repo)
+                .arg("init")
+                .output()
+                .await?;
+            Command::new("git")
+                .current_dir(repo)
+                .args(["config", "user.name", "Test User"])
+                .output()
+                .await?;
+            Command::new("git")
+                .current_dir(repo)
+                .args(["config", "user.email", "test@example.com"])
+                .output()
+                .await?;
+        }
+
+        let mut source_file = File::create(source_repo.join("source.txt"))?;
+        writeln!(source_file, "source content")?;
+        Command::new("git")
+            .current_dir(&source_repo)
+            .args(["add", "."])
+            .output()
+            .await?;
+        Command::new("git")
+            .current_dir(&source_repo)
+            .args(["commit", "-m", "Source Subject"])
+            .output()
+            .await?;
+        let output = Command::new("git")
+            .current_dir(&source_repo)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .await?;
+        let source_head = String::from_utf8(output.stdout)?.trim().to_string();
+        let source_url = source_repo.to_string_lossy().to_string();
+
+        let (tx, mut rx) = mpsc::channel(4);
+        let (agent, _) = FetchAgent::new(cache_repo, tx);
+        let mut queue = HashMap::new();
+        queue.insert(
+            Some(source_url.clone()),
+            HashSet::from([source_head.clone()]),
+        );
+
+        agent.process_queue(&mut queue).await;
+
+        let event = rx.recv().await.expect("fetcher should emit an event");
+        match event {
+            Event::PatchSubmitted {
+                article_id,
+                subject,
+                repo_url,
+                ..
+            } => {
+                assert_eq!(article_id, source_head);
+                assert_eq!(subject, "Source Subject");
+                assert_eq!(repo_url.as_deref(), Some(source_url.as_str()));
+            }
+            other => panic!("expected PatchSubmitted event, got {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_is_present_with_tree_sha() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let repo_path = temp_dir.path().to_path_buf();
+
+        // Setup dummy repo
+        Command::new("git")
+            .current_dir(&repo_path)
+            .arg("init")
+            .output()
+            .await?;
+        Command::new("git")
+            .current_dir(&repo_path)
+            .args(["config", "user.name", "Test User"])
+            .output()
+            .await?;
+        Command::new("git")
+            .current_dir(&repo_path)
+            .args(["config", "user.email", "test@example.com"])
+            .output()
+            .await?;
+
+        let file_path = repo_path.join("file.txt");
+        let mut file = File::create(&file_path)?;
+        writeln!(file, "content")?;
+
+        Command::new("git")
+            .current_dir(&repo_path)
+            .args(["add", "."])
+            .output()
+            .await?;
+        Command::new("git")
+            .current_dir(&repo_path)
+            .args(["commit", "-m", "Subject Line"])
+            .output()
+            .await?;
+
+        let (tx, _rx) = mpsc::channel(1);
+        let (agent, _) = FetchAgent::new(repo_path.clone(), tx);
+
+        let output = Command::new("git")
+            .current_dir(&repo_path)
+            .args(["rev-parse", "HEAD^{tree}"])
+            .output()
+            .await?;
+        let tree_sha = String::from_utf8(output.stdout)?.trim().to_string();
+
+        assert!(
+            !agent.is_present(&tree_sha).await,
+            "Tree SHA should not be considered a present commit"
+        );
+
+        let output = Command::new("git")
+            .current_dir(&repo_path)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .await?;
+        let commit_sha = String::from_utf8(output.stdout)?.trim().to_string();
+
+        assert!(
+            agent.is_present(&commit_sha).await,
+            "Commit SHA should be considered present"
+        );
+
+        Ok(())
+    }
+}

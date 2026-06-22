@@ -1,0 +1,3774 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/x-icon" href="static/favicon.ico">
+    <title>AOS AI Maintainer</title>
+    <style>
+        :root {
+            --bg: #f5f5f5;
+            --border: #ccc;
+            --border-light: #eee;
+            --text: #24292f;
+            --text-muted: #666;
+            --text-dim: #999;
+            --link: #007bff;
+            --hover: #e0e0e0;
+            --selected: #d0d0d0;
+            --code-bg: #f6f8fa;
+            --code-border: #d0d7de;
+            --btn-bg: #fff;
+            --input-bg: #fff;
+            --card-bg: #fff;
+            --ai-bg: #ffffff;
+            --ai-border: #283593;
+            --warn-bg: #fff3cd;
+            --warn-border: #ffeeba;
+            --warn-text: #856404;
+            --error-bg: #fff0f0;
+            --error-border: #ffcdd2;
+            --error-text: #d73a49;
+            --error-title: #b71c1c;
+            --thought-color: #6a737d;
+            --thought-border: #d0d7de;
+            --log-color: #000;
+            --th-bg: #fafafa;
+            --status-pending: #0366d6;
+            --status-inreview: #d67f05;
+            --status-reviewed: #22863a;
+            --status-failed: #d73a49;
+            --status-embargoed: #6f42c1;
+            --tag-bg: #e0f7fa;
+            --tag-text: #006064;
+            --diff-add-bg: #e6ffec;
+            --diff-rm-bg: #ffebe9;
+            --diff-header: #005cc5;
+            --role-user: #005cc5;
+            --role-tool: #3f51b5;
+            --fn-name: #6f42c1;
+
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #0d1117;
+                --border: #30363d;
+                --border-light: #21262d;
+                --text: #c9d1d9;
+                --text-muted: #8b949e;
+                --text-dim: #6e7681;
+                --link: #58a6ff;
+                --hover: #21262d;
+                --selected: #21262d;
+                --code-bg: #161b22;
+                --code-border: #30363d;
+                --btn-bg: #21262d;
+                --input-bg: #0d1117;
+                --card-bg: #161b22;
+                --ai-bg: #161b22;
+                --ai-border: #58a6ff;
+                --warn-bg: #3a2a00;
+                --warn-border: #755200;
+                --warn-text: #e5b300;
+                --error-bg: #3a0000;
+                --error-border: #750000;
+                --error-text: #ff6b6b;
+                --error-title: #ff8b8b;
+                --thought-color: #8b949e;
+                --thought-border: #30363d;
+                --log-color: #c9d1d9;
+                --th-bg: #161b22;
+                --status-pending: #58a6ff;
+                --status-inreview: #d29922;
+                --status-reviewed: #3fb950;
+                --status-failed: #f85149;
+                --status-embargoed: #d2a8ff;
+                --tag-bg: #032f62;
+                --tag-text: #79c0ff;
+                --diff-add-bg: rgba(46, 160, 67, 0.15);
+                --diff-rm-bg: rgba(248, 81, 73, 0.15);
+                --diff-header: #79c0ff;
+                --role-user: #79c0ff;
+                --role-tool: #82aaff;
+                --fn-name: #d2a8ff;
+            }
+        }
+
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            color-scheme: light dark;
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+            font-size: 13px;
+            line-height: 1.4;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 12px 16px;
+            background-color: var(--bg);
+            color: var(--text);
+        }
+
+        h1 {
+            font-size: 2.0em;
+            margin: 0 0 16px 0;
+            padding-bottom: 12px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        h2 {
+            font-size: 1.1em;
+            margin: 0 0 8px 0;
+            padding-bottom: 4px;
+            border-bottom: 1px solid var(--border-light);
+        }
+
+        h3 {
+            font-size: 1em;
+            margin: 12px 0 6px 0;
+        }
+
+        a {
+            color: var(--link);
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+        }
+
+        /* Navigation */
+        .nav {
+            margin-bottom: 10px;
+        }
+
+        .nav a {
+            cursor: pointer;
+        }
+
+        /* Search and Controls */
+        .controls {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 10px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .controls input[type="text"] {
+            background: var(--input-bg);
+            color: var(--text);
+            flex: 1;
+            min-width: 200px;
+            padding: 4px 8px;
+            font-family: inherit;
+            font-size: inherit;
+            border: 1px solid var(--border);
+            border-radius: 3px;
+        }
+
+        .controls button,
+        button {
+            padding: 4px 10px;
+            font-family: inherit;
+            font-size: inherit;
+            border: 1px solid var(--border);
+            background: var(--btn-bg);
+            border-radius: 3px;
+            cursor: pointer;
+        }
+
+        .controls button:hover,
+        button:hover {
+            background: var(--hover);
+        }
+
+        .controls button:disabled,
+        button:disabled {
+            opacity: 0.5;
+            cursor: default;
+        }
+
+        .controls button.active {
+            background: var(--selected);
+            font-weight: bold;
+        }
+
+        /* Table Styles */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th,
+        td {
+            text-align: left;
+            padding: 6px 8px;
+            border-bottom: 1px solid var(--border-light);
+            vertical-align: top;
+        }
+
+        th {
+            font-weight: 600;
+            background: var(--th-bg);
+        }
+
+        thead th {
+            cursor: default;
+        }
+
+        th.sortable {
+            cursor: pointer;
+            user-select: none;
+            white-space: nowrap;
+        }
+
+        th.sortable:hover {
+            background: var(--hover);
+        }
+
+        th.sorted {
+            color: var(--link);
+        }
+
+        .sort-ind {
+            font-size: 0.85em;
+            color: var(--link);
+        }
+
+        .sort-ind sup {
+            font-size: 0.7em;
+            margin-left: 1px;
+        }
+
+        .sort-bar {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px;
+            margin: 10px 0 6px;
+            font-size: 0.85em;
+        }
+
+        .sort-hint {
+            color: var(--text-muted);
+        }
+
+        .sort-clear {
+            cursor: pointer;
+            color: var(--link);
+            margin-left: 2px;
+        }
+
+        .sort-clear:hover {
+            text-decoration: underline;
+        }
+
+        tr:hover {
+            background-color: var(--hover);
+        }
+
+        tr.selected {
+            background-color: var(--selected);
+            outline: 1px solid #aaa;
+        }
+
+        tr {
+            cursor: pointer;
+        }
+
+        /* Status Badge */
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.85em;
+            font-weight: bold;
+            background: transparent;
+            border: none;
+        }
+
+        .status-badge::before {
+            content: '#';
+            display: block;
+            color: currentColor;
+        }
+
+        .status-Pending {
+            color: var(--status-pending);
+        }
+
+        .status-InReview,
+        .status-Analyzing,
+        .status-Reviewing {
+            color: var(--status-inreview);
+        }
+
+        .status-Finished,
+        .status-Applied,
+        .status-Reviewed {
+            color: var(--status-reviewed);
+        }
+
+        .status-Failed,
+        .status-FailedToApply {
+            color: var(--status-failed);
+        }
+
+        .status-Cancelled,
+        .status-Skipped {
+            color: var(--thought-color);
+        }
+
+        .status-Embargoed {
+            color: var(--status-embargoed);
+        }
+
+        .status-Incomplete {
+            color: var(--thought-color);
+        }
+
+        /* Subsystem Tags - UNCHANGED */
+        .tag {
+            display: inline-block;
+            background: var(--tag-bg);
+            color: var(--tag-text);
+            padding: 1px 4px;
+            border-radius: 3px;
+            font-size: 0.75em;
+            margin-right: 4px;
+            border: 1px solid #b2ebf2;
+            vertical-align: middle;
+        }
+
+        /* Pagination */
+        .pagination {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 8px;
+            margin-top: 12px;
+            font-size: 0.9em;
+        }
+
+        /* Stats Bar */
+        .stats-container {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 12px;
+            font-size: 0.9em;
+            color: var(--text-muted);
+            /* background: var(--btn-bg); */
+            /* border: 1px solid var(--border-light); */
+            border-radius: 4px;
+            padding: 8px 12px;
+            margin-top: 20px;
+        }
+
+        .stats-group {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .stats-sep {
+            width: 1px;
+            height: 16px;
+            background: var(--border-light);
+            margin: 0 4px;
+        }
+
+        .stats-label {
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        .stats-val {
+            font-weight: bold;
+            color: var(--text);
+        }
+
+        .stats-sub {
+            font-size: 0.85em;
+            opacity: 0.7;
+        }
+
+        .stats-link {
+            font-weight: 500;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        
+        .status-dot.status-Pending { background-color: var(--status-pending); }
+        .status-dot.status-InReview { background-color: var(--status-inreview); }
+        .status-dot.status-Reviewed { background-color: var(--status-reviewed); }
+        .status-dot.status-Failed { background-color: var(--status-failed); }
+        .status-dot.status-FailedToApply { background-color: var(--status-failed); }
+        .status-dot.status-Embargoed { background-color: var(--status-embargoed); }
+        .status-dot.status-Cancelled { background-color: var(--thought-color); }
+        .status-dot.status-Incomplete { background-color: var(--thought-color); }
+        .status-dot.status-Skipped { background-color: var(--thought-color); }
+
+        /* Stats Footer */
+        .stats {
+            margin-top: 16px;
+            padding-top: 8px;
+            border-top: 1px solid var(--border);
+            font-size: 0.85em;
+            color: var(--text-muted);
+        }
+
+        /* Key-value display */
+        .kv {
+            display: grid;
+            grid-template-columns: 100px 1fr;
+            gap: 4px 8px;
+            margin-bottom: 4px;
+            font-size: 0.95em;
+        }
+
+        .kv .label {
+            font-weight: 600;
+            color: var(--text-muted);
+        }
+
+        /* Section containers */
+        .section {
+            margin-bottom: 16px;
+        }
+
+        /* Copy button */
+        .copy-btn {
+            cursor: pointer;
+            border: 1px solid var(--border);
+            background: var(--btn-bg);
+            padding: 1px 5px;
+            border-radius: 3px;
+            font-size: 11px;
+            margin-left: 6px;
+        }
+
+        .copy-btn:hover {
+            background: var(--hover);
+        }
+
+        .permalink-icon {
+            display: inline-flex;
+            align-items: center;
+            color: var(--text-muted);
+            opacity: 0.3;
+            transition: opacity 0.2s, color 0.2s;
+            margin-left: 8px;
+            text-decoration: none;
+            vertical-align: middle;
+        }
+
+        .permalink-icon:hover {
+            opacity: 1;
+            color: var(--link);
+        }
+
+        /* Review Cards */
+        .review-card {
+            border: 1px solid var(--border-light);
+            padding: 10px;
+            margin-bottom: 10px;
+            border-radius: 4px;
+            background: var(--btn-bg);
+        }
+
+        .review-meta {
+            display: grid;
+            grid-template-columns: auto 1fr;
+            gap: 4px 12px;
+            font-size: 0.9em;
+            color: var(--text-muted);
+        }
+
+        .review-meta-label {
+            font-weight: 600;
+        }
+
+        .review-meta-sep {
+            grid-column: 1 / -1;
+            border-top: 1px solid var(--border-light);
+            margin: 4px 0;
+        }
+
+        .findings-list {
+            margin-top: 10px;
+            border: 1px solid var(--border-light);
+            border-radius: 6px;
+            overflow: hidden;
+            background: var(--bg);
+        }
+
+        .finding-item {
+            padding: 10px 12px;
+            border-top: 1px solid var(--border-light);
+        }
+
+        .finding-item:first-child {
+            border-top: 0;
+        }
+
+        .finding-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 6px;
+            font-weight: 600;
+        }
+
+        .severity-badge {
+            display: inline-block;
+            min-width: 64px;
+            padding: 2px 8px;
+            border-radius: 999px;
+            color: #fff;
+            text-align: center;
+            font-size: 0.82em;
+            line-height: 1.5;
+        }
+
+        .severity-critical { background: #B71C1C; }
+        .severity-high { background: #FF5722; }
+        .severity-medium { background: #FF9800; }
+        .severity-low { background: #FBC02D; color: #222; }
+
+        .finding-body {
+            white-space: pre-wrap;
+            line-height: 1.45;
+        }
+
+        .finding-explanation {
+            margin-top: 8px;
+            color: var(--text-muted);
+            white-space: pre-wrap;
+            line-height: 1.45;
+        }
+
+        .finding-triage {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px dashed var(--border-light);
+            display: grid;
+            gap: 8px;
+        }
+
+        .finding-triage-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .triage-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-size: 0.82em;
+            font-weight: 600;
+        }
+
+        .triage-pending {
+            background: #e3f2fd;
+            color: #0d47a1;
+        }
+
+        .triage-not_issue {
+            background: var(--border-light);
+            color: var(--text-muted);
+        }
+
+        .triage-to_fix {
+            background: #fff3cd;
+            color: #7a4f00;
+        }
+
+        .triage-fixed {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .finding-triage textarea {
+            width: 100%;
+            min-height: 56px;
+            resize: vertical;
+        }
+
+        .triage-comments {
+            display: grid;
+            gap: 6px;
+        }
+
+        .triage-comment {
+            background: var(--bg);
+            border: 1px solid var(--border-light);
+            border-radius: 6px;
+            padding: 8px;
+        }
+
+        .triage-comment-meta {
+            color: var(--text-muted);
+            font-size: 0.82em;
+            margin-bottom: 4px;
+            display: flex;
+            justify-content: space-between;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .triage-comment-delete {
+            border: none;
+            background: transparent;
+            color: var(--error-text);
+            cursor: pointer;
+            font-size: 0.95em;
+            padding: 0;
+        }
+
+        .triage-comment-body {
+            white-space: pre-wrap;
+            line-height: 1.4;
+        }
+
+        /* Collapsible sections */
+        .toggle-btn {
+            cursor: pointer;
+            color: var(--text-muted);
+            font-weight: 600;
+            font-size: 0.9em;
+            background: none;
+            border: none;
+            padding: 0;
+            font-family: inherit;
+        }
+
+        .toggle-btn:hover {
+            color: var(--link);
+        }
+
+        .collapsible {
+            display: none;
+            margin-top: 6px;
+        }
+
+        .collapsible.open {
+            display: block;
+        }
+
+        /* Code/Log blocks */
+        .log-block {
+            background: var(--code-bg);
+            color: var(--text);
+            padding: 8px;
+            white-space: pre-wrap;
+            font-family: inherit;
+            max-height: 400px;
+            overflow-y: auto;
+            border: 1px solid var(--code-border);
+            border-radius: 4px;
+            font-size: 12px;
+            line-height: 1.4;
+        }
+
+        .log-inline-block {
+            background: var(--code-bg);
+            color: var(--text);
+            padding: 8px;
+            white-space: pre-wrap;
+            font-family: inherit;
+            max-height: 4000px;
+            overflow-y: auto;
+            border: 1px solid var(--code-border);
+            border-radius: 4px;
+            font-size: 12px;
+            line-height: 1.4;
+        }
+
+        /* Diff highlighting */
+        .diff-line {
+            display: block;
+            padding: 0 4px;
+            min-height: 1.3em;
+        }
+
+        .diff-added {
+            background-color: var(--diff-add-bg);
+        }
+
+        .diff-removed {
+            background-color: var(--diff-rm-bg);
+        }
+
+        .diff-header {
+            color: var(--diff-header);
+            font-weight: bold;
+        }
+
+        .ai-comment {
+            background-color: var(--ai-bg);
+            border-left: 3px solid var(--ai-border);
+            padding-left: 12px;
+            font-weight: 500;
+        }
+
+        .ai-comment-critical {
+            border-left-color: #B71C1C !important;
+        }
+
+        .ai-comment-high {
+            border-left-color: #FF5722 !important;
+        }
+
+        .ai-comment-medium {
+            border-left-color: #FF9800 !important;
+        }
+
+        .ai-comment-low {
+            border-left-color: #FBC02D !important;
+        }
+
+        /* Thread tree */
+        .thread-tree {
+            font-size: 0.95em;
+        }
+
+        .thread-tree ul {
+            list-style: none;
+            padding-left: 0;
+            margin: 0;
+        }
+
+        .thread-tree li {
+            margin-left: 16px;
+            padding: 2px 0;
+        }
+
+        .thread-tree .date {
+            color: var(--text-muted);
+            font-size: 0.9em;
+        }
+
+        .thread-tree .current {
+            font-weight: bold;
+            background: #eef;
+        }
+
+        /* Log viewer roles */
+        .log-entry {
+            display: flex;
+            border-bottom: 1px solid var(--border-light);
+            padding: 4px 0;
+        }
+
+        .log-entry:hover {
+            background: var(--code-bg);
+        }
+
+        .log-gutter {
+            flex-shrink: 0;
+            width: 60px;
+            text-align: right;
+            padding-right: 10px;
+            font-weight: bold;
+            font-size: 0.85em;
+            color: var(--text-dim);
+        }
+
+        .log-content {
+            flex-grow: 1;
+            min-width: 0;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .role-user .log-gutter {
+            color: var(--diff-header);
+        }
+
+        .role-model .log-gutter {
+            color: var(--text);
+        }
+
+        .role-system .log-gutter {
+            color: var(--status-inreview);
+        }
+
+        .role-tool .log-gutter {
+            color: var(--role-tool); /* material indigo */
+        }
+
+        .role-tool .log-content {
+            color: var(--log-color);
+        }
+
+
+
+        .fn-name {
+            font-weight: bold;
+            color: var(--fn-name);
+        }
+
+        /* Expandable JSON */
+        .json-expandable {
+            cursor: pointer;
+        }
+
+        .json-expandable:hover .json-preview {
+            text-decoration: underline;
+        }
+
+        .json-formatted {
+            background: var(--code-bg);
+            border: 1px solid var(--code-border);
+            border-radius: 3px;
+            padding: 6px;
+            margin: 4px 0 0 0;
+            font-family: inherit;
+            font-size: 12px;
+            line-height: 1.3;
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        /* Message view */
+        .message-meta {
+            color: var(--text-muted);
+            margin-bottom: 12px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border-light);
+        }
+
+        .message-meta div {
+            margin-bottom: 2px;
+        }
+
+        .message-meta .label {
+            font-weight: 600;
+            width: 50px;
+            display: inline-block;
+        }
+
+        pre.body {
+            color-scheme: light dark;
+            background: var(--code-bg);
+            padding: 10px;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            border: 1px solid var(--code-border);
+            border-radius: 4px;
+            margin: 0;
+        }
+
+        /* Keyboard hints */
+        .kbd-hint {
+            position: fixed;
+            bottom: 10px;
+            right: 10px;
+            background: var(--text);
+            color: var(--bg);
+            padding: 6px 10px;
+            border-radius: 4px;
+            font-size: 11px;
+            opacity: 0.6;
+        }
+
+        .kbd-hint:hover {
+            opacity: 1;
+        }
+
+        kbd {
+            background: rgba(255, 255, 255, 0.2);
+            padding: 1px 4px;
+            border-radius: 2px;
+            margin: 0 2px;
+        }
+
+        .json-preview {
+            color: var(--text-muted);
+        }
+
+        .json-size {
+            color: var(--border);
+            /* Light gray like buttons usually are */
+            font-size: 0.85em;
+            float: right;
+            margin-left: 8px;
+        }
+
+        /* Loading state */
+        .loading {
+            color: var(--text-muted);
+            padding: 20px;
+            text-align: center;
+        }
+
+        .error {
+            color: var(--status-failed);
+            padding: 20px;
+        }
+
+        /* Stats & Charts */
+        .chart-section {
+            margin-bottom: 30px;
+            background: var(--card-bg);
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+            border: 1px solid var(--border-light);
+        }
+
+
+        .stat-card-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+            gap: 16px;
+            margin-bottom: 28px;
+        }
+
+        .stat-card {
+            position: relative;
+            background: var(--card-bg);
+            border: 1px solid var(--border-light);
+            padding: 18px 20px;
+            border-radius: 12px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+            display: flex;
+            flex-direction: column;
+            gap: 7px;
+            overflow: hidden;
+            transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+        }
+
+        .stat-card::before {
+            content: "";
+            position: absolute;
+            inset: 0 auto 0 0;
+            width: 3px;
+            background: var(--accent, var(--link));
+            opacity: 0.85;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 22px rgba(0, 0, 0, 0.10);
+            border-color: var(--border);
+        }
+
+        .stat-card h3 {
+            margin: 0;
+            font-size: 0.74em;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            letter-spacing: 0.7px;
+            font-weight: 600;
+        }
+
+        .stat-card .value {
+            font-size: 2.1em;
+            font-weight: 700;
+            color: var(--text);
+            line-height: 1.1;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .stat-card .sub {
+            font-size: 0.8em;
+            color: var(--text-muted);
+            font-variant-numeric: tabular-nums;
+        }
+
+        .stat-card.clickable {
+            cursor: pointer;
+        }
+
+        .stat-card.clickable:hover {
+            border-color: var(--accent, var(--link));
+        }
+
+        .stat-card-hint {
+            font-size: 0.72em;
+            color: var(--accent, var(--link));
+            margin-top: 2px;
+        }
+
+        /* Findings drill-down modal */
+        .findings-modal-content {
+            max-width: 760px;
+            text-align: left;
+        }
+
+        .findings-count {
+            color: var(--text-muted);
+            font-size: 0.85em;
+            margin-bottom: 12px;
+        }
+
+        .findings-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .finding-row {
+            border: 1px solid var(--border-light);
+            border-radius: 8px;
+            padding: 10px 12px;
+            cursor: pointer;
+            transition: background 0.12s ease, border-color 0.12s ease;
+        }
+
+        .finding-row:hover {
+            background: var(--hover);
+            border-color: var(--border);
+        }
+
+        .finding-row-head {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .finding-sev {
+            display: inline-block;
+            padding: 1px 8px;
+            border-radius: 999px;
+            font-size: 0.75em;
+            font-weight: 700;
+        }
+
+        .finding-ts {
+            font-size: 0.78em;
+            color: var(--text-muted);
+            border: 1px solid var(--border-light);
+            border-radius: 999px;
+            padding: 1px 8px;
+        }
+
+        .finding-row-subject {
+            flex: 1;
+            min-width: 0;
+            font-weight: 600;
+            color: var(--text);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .finding-row-problem {
+            margin-top: 6px;
+            font-size: 0.88em;
+            color: var(--text-muted);
+            line-height: 1.5;
+        }
+
+        .findings-empty {
+            color: var(--text-muted);
+            padding: 20px;
+            text-align: center;
+        }
+
+        .triage-dashboard {
+            display: grid;
+            grid-template-columns: minmax(300px, 1fr) minmax(300px, 1fr);
+            gap: 20px;
+            margin-bottom: 28px;
+            align-items: stretch;
+        }
+
+        .triage-panel {
+            background: var(--card-bg);
+            border: 1px solid var(--border-light);
+            border-radius: 12px;
+            padding: 22px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .triage-panel h3 {
+            margin: 0 0 18px;
+            font-size: 1.02em;
+            color: var(--text);
+        }
+
+        .triage-chart {
+            width: 100%;
+            height: 300px;
+            flex: 1;
+        }
+
+        .triage-breakdown {
+            display: flex;
+            flex-direction: column;
+            gap: 18px;
+            margin-bottom: 24px;
+        }
+
+        .triage-breakdown-row {
+            display: grid;
+            grid-template-columns: 96px 1fr 86px;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .triage-label {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        .triage-dot {
+            width: 9px;
+            height: 9px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        .triage-value {
+            text-align: right;
+            color: var(--text);
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .triage-value .triage-pct {
+            color: var(--text-muted);
+            font-weight: 400;
+            margin-left: 4px;
+        }
+
+        .triage-bar {
+            height: 10px;
+            overflow: hidden;
+            background: var(--bg);
+            border: 1px solid var(--border-light);
+            border-radius: 999px;
+        }
+
+        .triage-bar-fill {
+            height: 100%;
+            border-radius: 999px;
+            transition: width 0.4s ease;
+        }
+
+        .triage-accuracy {
+            margin-top: auto;
+            padding: 18px;
+            border-radius: 10px;
+            background: var(--bg);
+            border: 1px solid var(--border-light);
+        }
+
+        .triage-accuracy-head {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+        }
+
+        .triage-accuracy-label {
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        .triage-accuracy-value {
+            font-size: 1.9em;
+            font-weight: 700;
+            color: var(--status-reviewed);
+            font-variant-numeric: tabular-nums;
+        }
+
+        .triage-accuracy-track {
+            height: 8px;
+            margin: 12px 0 8px;
+            border-radius: 999px;
+            background: var(--border-light);
+            overflow: hidden;
+        }
+
+        .triage-accuracy-fill {
+            height: 100%;
+            border-radius: 999px;
+            background: var(--status-reviewed);
+            transition: width 0.4s ease;
+        }
+
+        .triage-accuracy-sub {
+            font-size: 0.82em;
+            color: var(--text-muted);
+            font-variant-numeric: tabular-nums;
+        }
+
+        .triage-notes {
+            border: 1px solid var(--border-light);
+            border-radius: 12px;
+            background: var(--card-bg);
+            margin-bottom: 28px;
+        }
+
+        .triage-notes > summary {
+            cursor: pointer;
+            padding: 14px 20px;
+            font-weight: 600;
+            color: var(--text);
+            list-style: none;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            user-select: none;
+        }
+
+        .triage-notes > summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .triage-notes > summary::before {
+            content: "▸";
+            color: var(--text-muted);
+            transition: transform 0.15s ease;
+        }
+
+        .triage-notes[open] > summary::before {
+            transform: rotate(90deg);
+        }
+
+        .triage-notes-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 12px;
+            padding: 0 20px 20px;
+        }
+
+        .triage-note {
+            color: var(--text-muted);
+            line-height: 1.55;
+            font-size: 0.9em;
+        }
+
+        .triage-note strong {
+            display: block;
+            color: var(--text);
+            margin-bottom: 3px;
+            font-size: 1.0em;
+        }
+
+        @media (max-width: 760px) {
+            .triage-dashboard {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .triage-dashboard {
+            display: grid;
+            grid-template-columns: minmax(280px, 1fr) minmax(280px, 1fr);
+            gap: 20px;
+            margin-bottom: 24px;
+        }
+
+        .triage-panel {
+            background: var(--card-bg);
+            border: 1px solid var(--border-light);
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+        }
+
+        .triage-chart {
+            width: 100%;
+            height: 320px;
+        }
+
+        .triage-breakdown {
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+
+        .triage-breakdown-row {
+            display: grid;
+            grid-template-columns: 90px 1fr 72px;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .triage-label {
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        .triage-value {
+            text-align: right;
+            color: var(--text-muted);
+            font-variant-numeric: tabular-nums;
+        }
+
+        .triage-bar {
+            height: 10px;
+            overflow: hidden;
+            background: var(--bg);
+            border: 1px solid var(--border-light);
+            border-radius: 999px;
+        }
+
+        .triage-bar-fill {
+            height: 100%;
+            border-radius: 999px;
+        }
+
+        .triage-stacked {
+            display: flex;
+            height: 20px;
+            overflow: hidden;
+            border-radius: 999px;
+            border: 1px solid var(--border-light);
+            background: var(--bg);
+            margin: 12px 0 10px;
+        }
+
+        .triage-stacked-segment {
+            min-width: 2px;
+        }
+
+        .triage-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px 16px;
+            color: var(--text-muted);
+            font-size: 0.9em;
+        }
+
+        .triage-legend-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .triage-swatch {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+
+        .triage-formulas {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 12px;
+            margin: -4px 0 24px;
+        }
+
+        .triage-formula {
+            background: var(--card-bg);
+            border: 1px solid var(--border-light);
+            border-radius: 8px;
+            padding: 12px 14px;
+            color: var(--text-muted);
+            line-height: 1.5;
+        }
+
+        .triage-formula strong {
+            display: block;
+            color: var(--text);
+            margin-bottom: 4px;
+        }
+
+        @media (max-width: 760px) {
+            .triage-dashboard {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* Modal Styles */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+        .modal-overlay.open {
+            display: flex;
+        }
+        .modal-content {
+            background: var(--bg);
+            padding: 32px;
+            border-radius: 8px;
+            max-width: 600px;
+            width: 90%;
+            max-height: 90vh;
+            overflow-y: auto;
+            position: relative;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            border: 1px solid var(--border-light);
+        }
+        .modal-close {
+            position: absolute;
+            top: 16px;
+            right: 16px;
+            cursor: pointer;
+            font-size: 1.5em;
+            color: var(--text-muted);
+            line-height: 1;
+            padding: 4px;
+        }
+        .modal-close:hover {
+            color: var(--text);
+        }
+        .about-logo {
+            display: flex;
+            align-items: center;
+            margin-bottom: 24px;
+            font-size: 1.8em;
+            font-weight: bold;
+            padding-bottom: 12px;
+            border-bottom: 1px solid var(--border);
+        }
+        .about-text p {
+            margin-bottom: 16px;
+            line-height: 1.6;
+            font-size: 1.05em;
+        }
+        .about-text blockquote {
+            border-left: 4px solid var(--border);
+            margin: 16px 0 24px 0;
+            padding: 12px 16px;
+            background: var(--code-bg);
+            color: var(--text-muted);
+            border-radius: 4px;
+        }
+        .about-text .disclaimer {
+            background-color: var(--warn-bg);
+            border: 1px solid var(--warn-border);
+            color: var(--warn-text);
+            padding: 12px;
+            border-radius: 4px;
+            margin-top: 24px;
+        }
+    </style>
+    <script src="static/echarts.min.js"></script>
+</head>
+
+<body>
+    <div id="app"></div>
+
+    <div class="kbd-hint">
+        <kbd>/</kbd> search
+        <kbd>j</kbd><kbd>k</kbd> nav
+        <kbd>Enter</kbd> open
+        <kbd>q</kbd> back
+    </div>
+
+    <div id="aboutModal" class="modal-overlay" onclick="if(event.target===this) closeAbout()">
+        <div class="modal-content">
+            <span class="modal-close" onclick="closeAbout()">&times;</span>
+            <div class="about-logo">
+                <img src="static/aos_logo.png" style="height: 1.5em; margin-right: 12px;" alt="Sashiko Logo">
+                About Sashiko
+            </div>
+            <div class="about-text">
+                <blockquote>
+                    <strong>Sashiko</strong> (刺し子, literally "little stabs") is a form of decorative reinforcement stitching from Japan. Originally used to reinforce points of wear or to repair worn places or tears with patches, here it represents our mission to reinforce the Linux kernel through automated, intelligent patch review.
+                </blockquote>
+
+                <p>
+                    Sashiko is an agentic Linux kernel code review system. It monitors public mailing lists to thoroughly evaluate proposed Linux kernel changes. The system acts like a team of specialized reviewers covering domains from high-level architecture verification and security audits to low-level resource management and concurrency analysis.
+                </p>
+
+                <p>
+                    It relies on an open-source set of <a href="https://github.com/masoncl/review-prompts" target="_blank" rel="noopener noreferrer" style="font-weight: 500;">per-subsystem and generic prompts</a> initially created by Chris Mason, combined with a custom multi-stage review protocol to maximize accuracy and minimize false positives.
+                </p>
+
+                <p>
+                    This is an open-source project that belongs to the <strong>Linux Foundation</strong>, licensed under the <strong>Apache License, Version 2.0</strong>.
+                </p>
+
+                <p>
+                    This particular instance of Sashiko is provided as a service and is actively <strong>reviewing all LKML (Linux Kernel Mailing List) submissions</strong>. All compute resources and LLM tokens utilized for these automated reviews are proudly provided and funded by <strong>Google</strong>.
+                </p>
+
+                <p>
+                    <strong>Quality of Reviews:</strong> In our tests using Gemini 3.1 Pro, Sashiko was able to successfully identify <strong>53.6% of bugs</strong> based on an unfiltered selection of the last 1000 upstream commits with <code>Fixed:</code> tags. 100% of these historical bugs had previously made it through human-driven code reviews.
+                </p>
+
+                <div class="disclaimer">
+                    <strong>Note:</strong> As with any Large Language Model-based tool, Sashiko's output is probabilistic. It might find or miss bugs across different runs with the exact same input. It is designed to augment and assist human reviewers, not to replace them.
+                </div>
+
+                <div style="margin-top: 32px; text-align: center;">
+                    <a href="https://github.com/sashiko-dev/sashiko" target="_blank" rel="noopener noreferrer" style="display: inline-flex; align-items: center; gap: 8px; font-weight: bold; color: var(--text); padding: 8px 16px; border: 1px solid var(--border); border-radius: 6px; background: var(--btn-bg); text-decoration: none; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
+                        <svg height="20" aria-hidden="true" viewBox="0 0 16 16" version="1.1" width="20" data-view-component="true" style="fill: currentColor;">
+                            <path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"></path>
+                        </svg>
+                        View Project on GitHub
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="findingsModal" class="modal-overlay" onclick="if(event.target===this) closeFindingsModal()">
+        <div class="modal-content findings-modal-content">
+            <span class="modal-close" onclick="closeFindingsModal()">&times;</span>
+            <h2 id="findingsModalTitle" style="margin-top:0;">明细</h2>
+            <div id="findingsModalBody"></div>
+        </div>
+    </div>
+
+    <script>
+        // =====================================================================
+        // STATE
+        // =====================================================================
+        const state = {
+            view: 'list',
+            listMode: 'patchsets',
+            currentPage: 1,
+            perPage: 50,
+            totalPages: 1,
+            searchQuery: '',
+            selectedIndex: -1,
+            stats: null,
+            mailingLists: [],
+            selectedList: '',
+            patchsetId: null,
+            patchsetPage: 1,
+            patchsetTotalPages: 1,
+            patchsetLimit: 50,
+            sorts: []
+        };
+
+        // Sortable columns for the patchsets table: key -> display label.
+        // Only 待确认 / 待修复 are sortable; keys match the backend whitelist in
+        // db.rs `build_order_by`.
+        const PATCHSET_SORT_COLUMNS = {
+            pending: '待确认',
+            to_fix: '待修复'
+        };
+
+        // =====================================================================
+        // ROUTER
+        // =====================================================================
+        function parseHash() {
+            let hash = window.location.hash || '#/';
+            let search = window.location.search || '';
+            let query = {};
+
+            if (search.startsWith('?')) {
+                const qStr = search.substring(1);
+                qStr.split('&').forEach(part => {
+                    const [k, v] = part.split('=');
+                    if (k) query[decodeURIComponent(k)] = decodeURIComponent(v || '');
+                });
+            }
+
+            const qIndex = hash.indexOf('?');
+            if (qIndex !== -1) {
+                const qStr = hash.substring(qIndex + 1);
+                hash = hash.substring(0, qIndex);
+                qStr.split('&').forEach(part => {
+                    const [k, v] = part.split('=');
+                    if (k) query[decodeURIComponent(k)] = decodeURIComponent(v || '');
+                });
+            }
+
+            if (hash === '#/' || hash === '#') {
+                return { view: 'list', query };
+            }
+            const patchMatch = hash.match(/^#\/patchset\/(.+)$/);
+            if (patchMatch) {
+                return { view: 'patchset', id: decodeURIComponent(patchMatch[1]), query };
+            }
+            const msgMatch = hash.match(/^#\/message\/(.+)$/);
+            if (msgMatch) {
+                return { view: 'message', id: decodeURIComponent(msgMatch[1]), query };
+            }
+            const baselineLogMatch = hash.match(/^#\/log\/baseline\/(.+)\/(\d+)$/);
+            if (baselineLogMatch) {
+                return { view: 'baseline_log', id: baselineLogMatch[1], idx: parseInt(baselineLogMatch[2]), query };
+            }
+            const logMatch = hash.match(/^#\/log\/(\d+)$/);
+            if (logMatch) {
+                return { view: 'log', id: logMatch[1], query };
+            }
+            if (hash === '#/stats') {
+                return { view: 'stats', query };
+            }
+            return { view: 'list', query };
+        }
+
+        let hasNavigatedInternally = false;
+        
+        function navigate(hash) {
+            hasNavigatedInternally = true;
+            window.location.hash = hash;
+        }
+
+        function goBack() {
+            if (hasNavigatedInternally) {
+                window.history.back();
+            } else {
+                navigate('#/');
+            }
+        }
+
+        async function router() {
+            const route = parseHash();
+            state.view = route.view;
+            state.selectedIndex = -1;
+
+            // Handle list param
+            if (route.query && typeof route.query.list !== 'undefined') {
+                 state.selectedList = route.query.list;
+            }
+
+            const app = document.getElementById('app');
+            app.innerHTML = '<div class="loading">Loading...</div>';
+
+            try {
+                // Ensure lists are loaded
+                if (state.mailingLists.length === 0) {
+                    await fetchMailingLists();
+                }
+
+                switch (route.view) {
+                    case 'list':
+                        await renderListView();
+                        break;
+                    case 'patchset':
+                        await renderPatchsetView(route.id, route.query || {});
+                        break;
+                    case 'message':
+                        await renderMessageView(route.id);
+                        break;
+                    case 'log':
+                        await renderLogView(route.id);
+                        break;
+                    case 'baseline_log':
+                        await renderBaselineLogView(route.id, route.idx);
+                        break;
+                    case 'stats':
+                        await renderStatsView();
+                        break;
+                    default:
+                        await renderListView();
+                }
+            } catch (e) {
+                app.innerHTML = `<div class="error">Error: ${escapeHtml(e.message)}</div>`;
+            }
+        }
+
+        window.addEventListener('hashchange', () => {
+            hasNavigatedInternally = true;
+            router();
+        });
+
+        // =====================================================================
+        // DATA FETCHING
+        // =====================================================================
+        async function fetchMailingLists() {
+            try {
+                const res = await fetch('/api/lists');
+                if (res.ok) {
+                    const lists = await res.json();
+                    lists.sort((a, b) => a.name.localeCompare(b.name));
+                    state.mailingLists = lists;
+                }
+            } catch (e) {
+                console.error("Failed to fetch mailing lists", e);
+            }
+        }
+
+        // =====================================================================
+        // UTILITIES
+        // =====================================================================
+        function openAbout() {
+            document.getElementById('aboutModal').classList.add('open');
+        }
+
+        function closeAbout() {
+            document.getElementById('aboutModal').classList.remove('open');
+        }
+
+        function openConfirmedFindings() {
+            openFindingsModal('确认问题数（待修复 + 已修复）', 'to_fix,fixed');
+        }
+
+        async function openFindingsModal(title, triageParam) {
+            const modal = document.getElementById('findingsModal');
+            document.getElementById('findingsModalTitle').textContent = title;
+            const body = document.getElementById('findingsModalBody');
+            body.innerHTML = '<div class="loading">正在加载...</div>';
+            modal.classList.add('open');
+            try {
+                const findings = await fetch(`/api/findings?triage=${encodeURIComponent(triageParam)}`).then(r => r.json());
+                body.innerHTML = renderFindingsList(findings);
+            } catch (e) {
+                body.innerHTML = `<div class="error">加载失败：${escapeHtml(e.message)}</div>`;
+            }
+        }
+
+        function closeFindingsModal() {
+            document.getElementById('findingsModal').classList.remove('open');
+        }
+
+        // Navigate using the stored modal data so message-ids with special chars
+        // never get inlined into onclick attributes.
+        function gotoPatchsetFromFinding(idx) {
+            const f = (state.findingsModalData || [])[idx];
+            if (!f) return;
+            closeFindingsModal();
+            navigate('#/patchset/' + encodeURIComponent(f.message_id || f.patchset_id));
+        }
+
+        function renderFindingsList(findings) {
+            if (!Array.isArray(findings) || findings.length === 0) {
+                return '<div class="findings-empty">暂无数据</div>';
+            }
+            state.findingsModalData = findings;
+            const sevStyle = {
+                Critical: 'background:#B71C1C;color:#fff',
+                High: 'background:#FF5722;color:#fff',
+                Medium: 'background:#FF9800;color:#fff',
+                Low: 'background:#FBC02D;color:#222'
+            };
+            const rows = findings.map((f, idx) => {
+                const sev = f.severity || 'Low';
+                const problem = (f.problem || '').trim();
+                const snippet = problem.length > 160 ? problem.slice(0, 160) + '…' : problem;
+                const subject = f.subject || '(no subject)';
+                const ts = triageLabel(f.triage_status || 'to_fix');
+                return `
+                    <div class="finding-row" onclick="gotoPatchsetFromFinding(${idx})">
+                        <div class="finding-row-head">
+                            <span class="finding-sev" style="${sevStyle[sev] || sevStyle.Low}">${escapeHtml(sev)}</span>
+                            <span class="finding-ts">${escapeHtml(ts)}</span>
+                            <span class="finding-row-subject">${escapeHtml(subject)}</span>
+                        </div>
+                        ${snippet ? `<div class="finding-row-problem">${escapeHtml(snippet)}</div>` : ''}
+                    </div>
+                `;
+            }).join('');
+            return `<div class="findings-count">共 ${findings.length} 条</div><div class="findings-list">${rows}</div>`;
+        }
+
+        function parseAuthor(authorStr) {
+            if (!authorStr) return { name: '', email: 'unknown' };
+            authorStr = authorStr.trim();
+            
+            const match = authorStr.match(/^(?:"?([^"]*)"?\s+)?<([^>]+)>$/);
+            if (match) {
+                let name = match[1] ? match[1].trim() : '';
+                const email = match[2].trim();
+                
+                if (name.toLowerCase() === 'unknown') {
+                    name = '';
+                }
+                
+                return { name, email };
+            }
+            
+            if (authorStr.includes('@')) {
+                return { name: '', email: authorStr };
+            }
+            
+            if (authorStr.toLowerCase() === 'unknown') {
+                return { name: '', email: 'unknown' };
+            }
+            
+            return { name: authorStr, email: '' };
+        }
+
+        function formatAuthorList(str) {
+            if (!str) return '-';
+            const parts = str.split(',');
+            return parts.map(p => {
+                const a = parseAuthor(p.trim());
+                return a.name ? `${a.name} <${a.email}>` : a.email;
+            }).join(', ');
+        }
+
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Escape') closeAbout();
+        });
+
+        function escapeHtml(text, highlightDiff = false, renderAiComments = false) {
+            if (!text) return '';
+            const escaped = String(text)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+
+            if (highlightDiff) {
+                const lines = escaped.split('\n');
+                const hasQuotes = lines.some(l => l.trimStart().startsWith('&gt;')); // Escaped >
+                let inDiffBlock = false;
+                let currentBlockIsQuoted = false;
+                let seenDiffOrQuote = false;
+                
+                // Pass 1: Classify
+                const classified = lines.map(line => {
+                    const trimmed = line.trimStart();
+                    const isQuoted = trimmed.startsWith('&gt;');
+                    
+                    let content = line;
+                    if (isQuoted) {
+                        content = trimmed.substring(4); 
+                        if (content.startsWith(' ')) content = content.substring(1);
+                    }
+                    
+                    const isHeader = content.startsWith('diff --git') || 
+                                     content.startsWith('Index: ') || 
+                                     content.startsWith('--- ') || 
+                                     content.startsWith('+++ ') || 
+                                     content.startsWith('@@ ');
+
+                    const isExtendedHeader = /^(new|old|deleted) file mode|similarity index|copy (from|to)|rename (from|to)/.test(content);
+                    
+                    if (isHeader || isExtendedHeader || isQuoted) {
+                        seenDiffOrQuote = true;
+                    }
+
+                    const isMeta = content.match(/^(commit [0-9a-f]+|Author:|Date:|Subject:|From:|To:|Cc:|Signed-off-by:)/i) && !renderAiComments;
+
+                    let type = 'TEXT'; // Default to comment candidate
+                    let isDefiniteDiff = false;
+
+                    if (isHeader || isExtendedHeader) {
+                        isDefiniteDiff = true;
+                        inDiffBlock = true;
+                        currentBlockIsQuoted = isQuoted;
+                    } else if (hasQuotes) {
+                        if (isQuoted) {
+                            isDefiniteDiff = true;
+                        } else {
+                            if (isMeta) isDefiniteDiff = true;
+                            else if (inDiffBlock) {
+                                if (currentBlockIsQuoted) {
+                                    // Breaking out of a quoted block
+                                    inDiffBlock = false;
+                                } else {
+                                    if (content.startsWith('+') && !content.startsWith('+++')) isDefiniteDiff = true;
+                                    else if (content.startsWith('-') && !content.startsWith('---') && content.trim() !== '--') isDefiniteDiff = true;
+                                    else if (content.startsWith(' ') || content.startsWith('\\') || content.startsWith('\t')) isDefiniteDiff = true;
+                                }
+                            }
+                        }
+                    } else {
+                        if (isMeta) isDefiniteDiff = true;
+                        else if (inDiffBlock) {
+                             if (content.startsWith('+') && !content.startsWith('+++')) isDefiniteDiff = true;
+                             else if (content.startsWith('-') && !content.startsWith('---')) isDefiniteDiff = true;
+                             else if (content.startsWith(' ') || content.startsWith('\\') || content.startsWith('\t')) isDefiniteDiff = true;
+                        }
+                    }
+
+                    if (isDefiniteDiff) {
+                        type = 'DIFF';
+                    } else if (line.trim() === '') {
+                        type = 'EMPTY';
+                    }
+
+                    // Parse severity if this is a potential comment candidate
+                    let severity = null;
+                    let displayLine = line;
+                    if (type === 'TEXT' && renderAiComments) {
+                        const severityMatch = line.match(/\[Severity:\s*(Critical|High|Medium|Low)\]/i);
+                        if (severityMatch) {
+                            severity = severityMatch[1].toLowerCase();
+                            displayLine = line.replace(/\[Severity:\s*(Critical|High|Medium|Low)\]/i, '').trim();
+                        }
+                    }
+
+                    // Store metadata for rendering
+                    let cls = 'diff-line';
+                    if (isHeader) cls += ' diff-header';
+                    else if (isDefiniteDiff) {
+                         if (content.startsWith('+') && !content.startsWith('+++')) cls += ' diff-added';
+                         else if (content.startsWith('-') && !content.startsWith('---') && content.trim() !== '--') cls += ' diff-removed';
+                    }
+
+                    return { line: displayLine, type, cls, severity };
+                });
+
+                // Pass 2: Group into logical blocks and propagate severity
+                let blocks = [];
+                let currentBlock = null;
+                
+                for (let i = 0; i < classified.length; i++) {
+                    const item = classified[i];
+                    if (item.type === 'TEXT') {
+                        if (!currentBlock) {
+                            currentBlock = { type: 'COMMENT', items: [], severity: null };
+                            blocks.push(currentBlock);
+                        }
+                        currentBlock.items.push(item);
+                        if (item.severity) {
+                            currentBlock.severity = item.severity;
+                        }
+                    } else if (item.type === 'EMPTY') {
+                        if (currentBlock) {
+                            currentBlock.items.push(item);
+                        } else {
+                            blocks.push({ type: 'EMPTY', item: item });
+                        }
+                    } else { // DIFF
+                        if (currentBlock) {
+                            // Split trailing EMPTY lines out of the block
+                            let trailingEmpty = [];
+                            while (currentBlock.items.length > 0 && currentBlock.items[currentBlock.items.length - 1].type === 'EMPTY') {
+                                trailingEmpty.unshift(currentBlock.items.pop());
+                            }
+                            currentBlock = null;
+                            trailingEmpty.forEach(e => blocks.push({ type: 'EMPTY', item: e }));
+                        }
+                        blocks.push({ type: 'DIFF', item: item });
+                    }
+                }
+                
+                // Handle end of loop trailing empty lines
+                if (currentBlock) {
+                    while (currentBlock.items.length > 0 && currentBlock.items[currentBlock.items.length - 1].type === 'EMPTY') {
+                        currentBlock.items.pop(); // Drop trailing blank lines completely to prevent bloating
+                    }
+                }
+                
+                // Render blocks
+                let resultHtml = '';
+                blocks.forEach(block => {
+                    if (block.type === 'COMMENT') {
+                        const sevClass = block.severity ? ` ai-comment-${block.severity}` : '';
+                        block.items.forEach(item => {
+                            if (item.line === "" && item.severity !== null) {
+                                return; // Skip the tag-only line
+                            }
+                            let c = item.cls;
+                            if (renderAiComments) c += ' ai-comment' + sevClass;
+                            resultHtml += `<div class="${c}">${item.line}</div>`;
+                        });
+                    } else if (block.type === 'EMPTY') {
+                        resultHtml += `<div class="${block.item.cls}">${block.item.line}</div>`;
+                    } else if (block.type === 'DIFF') {
+                        resultHtml += `<div class="${block.item.cls}">${block.item.line}</div>`;
+                    }
+                });
+                
+                return resultHtml;
+            }
+            return escaped;
+        }
+
+        function formatDate(unix, full = false) {
+            const d = new Date(unix * 1000);
+            return full ? d.toLocaleString() : d.toISOString().split('T')[0];
+        }
+
+        function formatDuration(seconds) {
+            seconds = Math.max(0, Math.floor(seconds || 0));
+            const hours = Math.floor(seconds / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            const secs = seconds % 60;
+            const parts = [];
+            if (hours) parts.push(`${hours}小时`);
+            if (minutes) parts.push(`${minutes}分`);
+            parts.push(`${secs}秒`);
+            return parts.join('');
+        }
+
+        function formatReviewDuration(reviews) {
+            const reviewList = reviews || [];
+            const starts = reviewList
+                .map(r => r.started_at || r.created_at)
+                .filter(Boolean);
+            if (starts.length === 0) return '';
+
+            const start = Math.min(...starts);
+            const completed = reviewList
+                .map(r => r.completed_at || r.interaction_created_at)
+                .filter(Boolean);
+
+            if (completed.length === 0) {
+                return `${formatDate(start, true)} - 进行中`;
+            }
+
+            const end = Math.max(...completed);
+            return `${formatDate(start, true)} - ${formatDate(end, true)} (${formatDuration(end - start)})`;
+        }
+
+        function copyToClipboard(text) {
+            navigator.clipboard.writeText(text).then(() => {
+                console.log('Copied:', text);
+            });
+        }
+
+        function renderStatCard(title, value, sub, accent, onClick) {
+            const style = accent ? ` style="--accent:${accent}"` : '';
+            const cls = onClick ? 'stat-card clickable' : 'stat-card';
+            const clickAttr = onClick ? ` onclick="${onClick}"` : '';
+            const hint = onClick ? `<div class="stat-card-hint">点击查看明细</div>` : '';
+            return `
+                <div class="${cls}"${style}${clickAttr}>
+                    <h3>${escapeHtml(title)}</h3>
+                    <div class="value">${escapeHtml(String(value))}</div>
+                    ${sub ? `<div class="sub">${escapeHtml(String(sub))}</div>` : ''}
+                    ${hint}
+                </div>
+            `;
+        }
+
+        function formatSize(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        function toggleCollapsible(id, btn) {
+            const el = document.getElementById(id);
+            if (el.classList.contains('open')) {
+                el.classList.remove('open');
+                if (btn) btn.innerText = btn.innerText.replace('▼', '▶');
+            } else {
+                el.classList.add('open');
+                if (btn) btn.innerText = btn.innerText.replace('▶', '▼');
+            }
+        }
+
+        function renderFindingsBadges(counts, status) {
+            const { low = 0, medium = 0, high = 0, critical = 0 } = counts;
+            if (low + medium + high + critical === 0) {
+                if (status === 'Reviewed' || status === 'Finished') {
+                    return '<span style="color:#2e7d32;">✓</span>';
+                }
+                return '<span style="color:var(--text-dim)">-</span>';
+            }
+            return `
+                <div style="display:inline-flex; gap:6px; font-weight:bold; font-size:0.9em; vertical-align:middle;">
+                    <span style="color:${critical > 0 ? '#B71C1C' : 'var(--text-dim)'}" title="Critical">${critical}</span>
+                    <span style="color:${high > 0 ? '#FF5722' : 'var(--text-dim)'}" title="High">${high}</span>
+                    <span style="color:${medium > 0 ? '#FF9800' : 'var(--text-dim)'}" title="Medium">${medium}</span>
+                    <span style="color:${low > 0 ? '#FBC02D' : 'var(--text-dim)'}" title="Low">${low}</span>
+                </div>
+            `;
+        }
+
+        function renderTriageCount(count, color) {
+            if (count === undefined || count === null) {
+                return '<span style="color:var(--text-dim)">-</span>';
+            }
+            const value = Number(count || 0);
+            const displayColor = value > 0 ? color : 'var(--text-dim)';
+            return `<span style="font-weight:bold; color:${displayColor};">${value}</span>`;
+        }
+
+        function sortToolArgs(entries) {
+            const priorityKeys = ['file_path', 'path', 'dir_path', 'filename', 'pattern', 'command', 'instruction', 'old_string', 'new_string', 'content', 'objective', 'fact'];
+
+            function getKeyKey(k) {
+                const pIdx = priorityKeys.indexOf(k);
+                if (pIdx !== -1) return String.fromCharCode(32 + pIdx);
+                if (k.startsWith('start_')) return k.substring(6) + '_0';
+                if (k.startsWith('end_')) return k.substring(4) + '_1';
+                return 'z' + k;
+            }
+
+            return entries.sort((a, b) => {
+                const ka = getKeyKey(a[0]);
+                const kb = getKeyKey(b[0]);
+                return ka.localeCompare(kb);
+            });
+        }
+
+        function updateUrlWithList() {
+            let url = new URL(window.location.href);
+            let searchParams = new URLSearchParams(window.location.search);
+            
+            // Check if 'list' is in the query string
+            if (searchParams.has('list') || window.location.search.startsWith('?list=')) {
+                if (state.selectedList) {
+                    searchParams.set('list', state.selectedList);
+                } else {
+                    searchParams.delete('list');
+                }
+                let searchStr = searchParams.toString() ? '?' + searchParams.toString() : '';
+                window.history.replaceState(null, null, window.location.pathname + searchStr + window.location.hash);
+                return;
+            }
+
+            let hash = url.hash;
+            let queryPart = '';
+            
+            const qIndex = hash.indexOf('?');
+            if (qIndex !== -1) {
+                hash = hash.substring(0, qIndex);
+            }
+            if (!hash) {
+                hash = '#/';
+            }
+            
+            // Rebuild query
+            const params = new URLSearchParams();
+            if (state.selectedList) {
+                params.set('list', state.selectedList);
+            }
+            
+            if (params.toString()) {
+                queryPart = '?' + params.toString();
+            }
+            
+            // Update without reload
+            window.history.replaceState(null, null, window.location.pathname + window.location.search + hash + queryPart);
+        }
+
+        function setMailingList(list) {
+            state.selectedList = list;
+            state.currentPage = 1;
+            updateUrlWithList();
+            fetchListData();
+        }
+
+        // Serializes the active sort into the API `sort` parameter.
+        function sortParam() {
+            return state.sorts.map(s => `${s.key}:${s.dir}`).join(',');
+        }
+
+        // Click a sortable header. Single-column only: cycles desc -> asc -> off.
+        function toggleSort(key) {
+            if (!PATCHSET_SORT_COLUMNS[key]) return;
+            const cur = state.sorts[0];
+
+            if (cur && cur.key === key) {
+                if (cur.dir === 'desc') {
+                    state.sorts = [{ key, dir: 'asc' }];
+                } else {
+                    state.sorts = [];
+                }
+            } else {
+                state.sorts = [{ key, dir: 'desc' }];
+            }
+
+            state.currentPage = 1;
+            applySort();
+        }
+
+        function clearSort() {
+            state.sorts = [];
+            state.currentPage = 1;
+            applySort();
+        }
+
+        function applySort() {
+            updateTableHeader();
+            renderSortBar();
+            fetchListData();
+        }
+
+        // =====================================================================
+        // LIST VIEW
+        // =====================================================================
+        async function renderListView() {
+            const app = document.getElementById('app');
+
+            const listOptions = state.mailingLists.map(l => 
+                `<option value="${escapeHtml(l.group)}" ${state.selectedList === l.group ? 'selected' : ''}>${escapeHtml(l.name)}</option>`
+            ).join('');
+
+            app.innerHTML = `
+                <h1>
+                    <span style="display:flex; align-items:center; cursor:pointer;" onclick="openAbout()">
+                        <img src="static/aos_logo.png" style="height: 1.2em; margin-right: 12px;">
+                        AOS AI Maintainer
+                    </span>
+                </h1>
+                <div class="controls">
+                    <select id="listSelector" onchange="setMailingList(this.value)" style="padding: 4px 8px; border: 1px solid var(--border); border-radius: 3px;">
+                        <option value="">All Lists</option>
+                        ${listOptions}
+                    </select>
+                    
+                    <input type="text" id="searchInput" placeholder="Search (subject, author:, date:)" value="${escapeHtml(state.searchQuery)}">
+
+                    <button onclick="triggerSearch()">Search</button>
+                    <button onclick="clearSearch()">Clear</button>
+                    <div style="flex:1"></div>
+                    <button id="btn-patchsets" onclick="setListMode('patchsets')" class="${state.listMode === 'patchsets' ? 'active' : ''}">Patchsets</button>
+                    <button id="btn-messages" onclick="setListMode('messages')" class="${state.listMode === 'messages' ? 'active' : ''}">Messages</button>
+                </div>
+                <div class="sort-bar" id="sortBar"></div>
+                <table id="dataTable">
+                    <thead id="tableHead"></thead>
+                    <tbody id="tableBody"></tbody>
+                </table>
+                <div class="pagination" id="pagination"></div>
+                <div class="stats" id="stats">Loading stats...</div>
+            `;
+
+            updateTableHeader();
+            await fetchListData();
+            fetchStats();
+
+            document.getElementById('searchInput').addEventListener('keypress', e => {
+                if (e.key === 'Enter') triggerSearch();
+            });
+        }
+
+        function sortableTh(key, label, style) {
+            const cur = state.sorts[0];
+            const active = cur && cur.key === key;
+            let indicator = '';
+            if (active) {
+                const arrow = cur.dir === 'asc' ? '▲' : '▼';
+                indicator = ` <span class="sort-ind">${arrow}</span>`;
+            }
+            const cls = 'sortable' + (active ? ' sorted' : '');
+            const styleAttr = style ? ` style="${style}"` : '';
+            return `<th class="${cls}"${styleAttr} title="点击排序" onclick="toggleSort('${key}')">${label}${indicator}</th>`;
+        }
+
+        function updateTableHeader() {
+            const thead = document.getElementById('tableHead');
+            if (!thead) return;
+
+            if (state.listMode === 'patchsets') {
+                thead.innerHTML = `<tr><th>Subject</th><th style="width:180px">Author</th><th style="width:120px">Branch</th><th style="width:100px">Date</th><th style="width:50px">Parts</th><th style="width:80px">Status</th><th style="width:120px">Findings</th><th style="width:70px">待确认</th><th style="width:70px">待修复</th></tr>`;
+            } else {
+                thead.innerHTML = `<tr><th>Subject</th><th style="width:180px">Author</th><th style="width:100px">Date</th><th style="width:30px"></th></tr>`;
+            }
+
+            renderSortBar();
+        }
+
+        function renderSortBar() {
+            const bar = document.getElementById('sortBar');
+            if (!bar) return;
+
+            if (state.listMode !== 'patchsets') {
+                bar.style.display = 'none';
+                bar.innerHTML = '';
+                return;
+            }
+
+            if (state.sorts.length === 0) {
+                bar.style.display = 'none';
+                bar.innerHTML = '';
+                return;
+            }
+
+            bar.style.display = 'flex';
+            const s = state.sorts[0];
+            const label = PATCHSET_SORT_COLUMNS[s.key] || s.key;
+            const arrow = s.dir === 'asc' ? '↑' : '↓';
+            bar.innerHTML = `<span class="sort-hint">当前排序：${escapeHtml(label)} ${arrow}</span>`
+                + `<a class="sort-clear" onclick="clearSort()">清除排序</a>`;
+        }
+
+        async function fetchListData() {
+            const endpoint = state.listMode === 'patchsets' ? '/api/patchsets' : '/api/messages';
+            let url = `${endpoint}?page=${state.currentPage}&per_page=${state.perPage}`;
+            if (state.searchQuery) {
+                url += `&q=${encodeURIComponent(state.searchQuery)}`;
+            }
+            if (state.selectedList) {
+                url += `&mailing_list=${encodeURIComponent(state.selectedList)}`;
+            }
+            if (state.listMode === 'patchsets' && state.sorts.length > 0) {
+                url += `&sort=${encodeURIComponent(sortParam())}`;
+            }
+
+            const res = await fetch(url);
+            const data = await res.json();
+
+            const items = data.items || [];
+            const total = data.total || 0;
+
+            state.totalPages = Math.ceil(total / state.perPage) || 1;
+
+            const tbody = document.getElementById('tableBody');
+            tbody.innerHTML = '';
+
+            items.forEach((p, idx) => {
+                const row = document.createElement('tr');
+                const d = new Date(p.date * 1000);
+                const dateStr = d.toISOString().split('T')[0];
+                const timeStr = d.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+
+                const dateHtml = `
+                    <div>${dateStr}</div>
+                    <div style="color:#666; font-size:0.85em;">${timeStr}</div>
+                `;
+
+                // Parse author
+                const author = parseAuthor(p.author);
+                const nameToDisplay = author.name || author.email;
+                const emailToDisplay = author.name ? author.email : '';
+
+                const authorHtml = `
+                    <div>${escapeHtml(nameToDisplay)}</div>
+                    ${emailToDisplay ? `<div style="color:#666; font-size:0.85em;">${escapeHtml(emailToDisplay)}</div>` : ''}
+                `;
+
+                if (state.listMode === 'patchsets') {
+                    const parts = (p.received_parts === p.total_parts && p.total_parts > 0)
+                        ? `${p.total_parts}`
+                        : `${p.received_parts || 0}/${p.total_parts || 0}`;
+
+                    const clickHandler = (e) => {
+                        if (e.target.closest('.copy-btn')) return;
+                        const target = `#/patchset/${encodeURIComponent(p.message_id || p.id)}`;
+                        if (e.button === 1 || e.ctrlKey || e.metaKey) {
+                            window.open(target, '_blank');
+                        } else if (e.button === 0) {
+                            navigate(target);
+                        }
+                    };
+                    row.onclick = clickHandler;
+                    row.onauxclick = clickHandler;
+
+                    let tagsHtml = '';
+                    if (p.subsystems && Array.isArray(p.subsystems) && p.subsystems.length > 0) {
+                        tagsHtml = '<div style="margin-top:2px">' + p.subsystems.map(s => `<span class="tag">${escapeHtml(s)}</span>`).join('') + '</div>';
+                    }
+
+                    const branch = p.baseline_branch && !/^[0-9a-f]{40}$/i.test(p.baseline_branch)
+                        ? p.baseline_branch
+                        : '-';
+
+                    let statusLabel = p.status || 'Pending';
+                    let findingsHtml = '-';
+                    if (p.findings_low !== undefined || p.findings_medium !== undefined || p.findings_high !== undefined || p.findings_critical !== undefined) {
+                        const counts = {
+                            low: p.findings_low || 0,
+                            medium: p.findings_medium || 0,
+                            high: p.findings_high || 0,
+                            critical: p.findings_critical || 0
+                        };
+                        findingsHtml = renderFindingsBadges(counts, statusLabel);
+                    }
+
+                    row.innerHTML = `
+                        <td><div>${escapeHtml(p.subject) || '(no subject)'}</div>${tagsHtml}</td>
+                        <td style="line-height:1.2;">${authorHtml}</td>
+                        <td>${escapeHtml(branch)}</td>
+                        <td style="line-height:1.2;">${dateHtml}</td>
+                        <td>${parts}</td>
+                        <td><span class="status-badge status-${statusLabel.replace(/ /g, '')}">${statusLabel}</span></td>
+                        <td>${findingsHtml}</td>
+                        <td>${renderTriageCount(p.findings_pending, 'var(--status-pending)')}</td>
+                        <td>${renderTriageCount(p.findings_to_fix, 'var(--warn-text)')}</td>
+                    `;
+                } else {
+                    const clickHandler = (e) => {
+                        if (e.target.closest('.copy-btn')) return;
+                        const target = `#/message/${encodeURIComponent(p.message_id)}`;
+                        if (e.button === 1 || e.ctrlKey || e.metaKey) {
+                            window.open(target, '_blank');
+                        } else if (e.button === 0) {
+                            navigate(target);
+                        }
+                    };
+                    row.onclick = clickHandler;
+                    row.onauxclick = clickHandler;
+
+                    row.innerHTML = `
+                        <td>${escapeHtml(p.subject) || '(no subject)'}</td>
+                        <td style="line-height:1.2;">${authorHtml}</td>
+                        <td style="line-height:1.2;">${dateHtml}</td>
+                        <td><button class="copy-btn" onclick="event.stopPropagation(); copyToClipboard('${escapeHtml(p.message_id)}')">📋</button></td>
+                    `;
+                }
+                tbody.appendChild(row);
+            });
+
+            updatePagination(total);
+        }
+
+        function updatePagination(total) {
+            const el = document.getElementById('pagination');
+            el.innerHTML = `
+                <button onclick="goToPage(1)" ${state.currentPage <= 1 ? 'disabled' : ''}>First</button>
+                <button onclick="changePage(-1)" ${state.currentPage <= 1 ? 'disabled' : ''}>Prev</button>
+                <span>Page ${state.currentPage} of ${state.totalPages} (${total} total)</span>
+                <button onclick="changePage(1)" ${state.currentPage >= state.totalPages ? 'disabled' : ''}>Next</button>
+                <button onclick="goToPage(${state.totalPages})" ${state.currentPage >= state.totalPages ? 'disabled' : ''}>Last</button>
+            `;
+        }
+
+        async function fetchStats() {
+            try {
+                const res = await fetch('/api/stats');
+                const data = await res.json();
+                state.stats = data;
+
+                document.getElementById('stats').outerHTML = `
+                    <div class="stats-container" id="stats">
+                        <div class="stats-group">
+                            <span class="stats-label">AOS AI Maintainer</span> 基于
+                            <a href="#" onclick="event.preventDefault(); openAbout();" style="font-weight:500;">Sashiko v${data.version}</a>
+                            <span class="stats-sep"></span>
+                            <a href="#/stats" style="font-weight:500;">Stats</a>
+                        </div>
+                        <div class="stats-sep"></div>
+                        <div class="stats-group">
+                            <span class="stats-val">${data.patchsets}</span> Patchsets
+                            <span class="stats-sub">(${data.messages} msgs)</span>
+                        </div>
+                        <div class="stats-sep"></div>
+                        <div class="stats-group" title="Pending patches to review">
+                            <span class="status-dot status-Pending"></span> ${data.pending || 0} Pending
+                        </div>
+                        <div class="stats-group" title="Patches currently in review">
+                            <span class="status-dot status-InReview"></span> ${data.reviewing || 0} In Review
+                        </div>
+                    </div>
+                `;
+            } catch (e) {
+                console.error(e);
+                document.getElementById('stats').innerHTML = 'Stats unavailable';
+            }
+        }
+
+        function triggerSearch() {
+            const input = document.getElementById('searchInput');
+            state.searchQuery = input.value.trim();
+            state.currentPage = 1;
+            fetchListData();
+        }
+
+        function clearSearch() {
+            document.getElementById('searchInput').value = '';
+            state.searchQuery = '';
+            state.currentPage = 1;
+            fetchListData();
+        }
+
+        function setListMode(mode) {
+            if (state.listMode === mode) return;
+            state.listMode = mode;
+            state.currentPage = 1;
+            document.getElementById('btn-patchsets').classList.toggle('active', mode === 'patchsets');
+            document.getElementById('btn-messages').classList.toggle('active', mode === 'messages');
+            updateTableHeader();
+            fetchListData();
+        }
+
+        async function changePage(delta) {
+            const newPage = state.currentPage + delta;
+            if (newPage < 1 || newPage > state.totalPages) return;
+            state.currentPage = newPage;
+            await fetchListData();
+        }
+
+        async function goToPage(page) {
+            if (page < 1 || page > state.totalPages) return;
+            state.currentPage = page;
+            await fetchListData();
+        }
+
+        // =====================================================================
+        // PATCHSET DETAIL VIEW
+        // =====================================================================
+        async function renderPatchsetView(id, query = {}) {
+            const page = parseInt(query.page) || 1;
+            const limit = parseInt(query.limit) || 50;
+            const res = await fetch(`/api/patchset?id=${encodeURIComponent(id)}&page=${page}&limit=${limit}`);
+            if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+            const data = await res.json();
+            
+            state.patchsetId = id;
+            state.patchsetPage = data.page || page;
+            state.patchsetLimit = data.limit || limit;
+            state.patchsetTotalPages = data.total_patches_in_db > 0 ? Math.ceil(data.total_patches_in_db / state.patchsetLimit) : 1;
+
+            const date = formatDate(data.date, true);
+            const patchMap = new Map();
+            if (data.patches) data.patches.forEach(p => patchMap.set(p.id, p));
+
+            const reviewsByPatch = new Map();
+            if (data.patches) data.patches.forEach(p => reviewsByPatch.set(p.id, []));
+            reviewsByPatch.set(null, []);
+            if (data.reviews) {
+                data.reviews.forEach(r => {
+                    const pid = r.patch_id || null;
+                    if (!reviewsByPatch.has(pid)) reviewsByPatch.set(pid, []);
+                    reviewsByPatch.get(pid).push(r);
+                });
+            }
+            const reviewDuration = formatReviewDuration(data.reviews);
+
+            let reviewsHtml = '';
+            const renderReviewList = (reviews, emailHtml = '', patchStatus = null) => {
+                if (!reviews || reviews.length === 0) {
+                    const statusToCheck = patchStatus || data.status;
+                    if (statusToCheck === 'Embargoed' && data.embargo_until) {
+                        const hours = data.date ? Math.round((data.embargo_until - data.date) / 3600) : null;
+                        const hoursText = hours !== null ? `${hours} hours` : 'some time';
+                        return `<p style="font-style:italic; font-size:1.2em; color:var(--status-embargoed);">Embargoed by mailing list policy to ${hoursText} after posting. Public at ${formatDate(data.embargo_until, true)}</p>`;
+                    }
+                    return `<p style="font-style:italic; color:#888;">No reviews yet.</p>`;
+                }
+                return reviews.map((r, i) => renderReviewCard(r, i === reviews.length - 1 ? emailHtml : '')).join('');
+            };
+
+            const generalReviews = reviewsByPatch.get(null) || [];
+            if (generalReviews.length > 0) {
+                reviewsHtml += `<h3>General Reviews</h3>${renderReviewList(generalReviews)}`;
+            }
+
+            const sortedPatchIds = Array.from(reviewsByPatch.keys())
+                .filter(id => id !== null)
+                .sort((a, b) => {
+                    const pa = patchMap.get(a);
+                    const pb = patchMap.get(b);
+                    return (pa?.part_index || 0) - (pb?.part_index || 0);
+                });
+
+            let summaryHtml = '';
+            if (sortedPatchIds.length > 1) {
+                summaryHtml = '<table style="margin-bottom: 20px;"><thead><tr><th>Patch</th><th>Potential Regressions</th></tr></thead><tbody>';
+            }
+
+            sortedPatchIds.forEach((pid, index) => {
+                const patch = patchMap.get(pid);
+                const reviews = reviewsByPatch.get(pid);
+                let header = patch
+                    ? `Patch ${patch.part_index}: <a href="#/message/${encodeURIComponent(patch.message_id)}">${escapeHtml(patch.subject || '(no subject)')}</a>`
+                    : `Patch ID ${pid}`;
+                const patchLink = window.location.origin + window.location.pathname + `#/patchset/${encodeURIComponent(state.patchsetId)}?${patch ? 'part=' + patch.part_index : 'patch=' + pid}`;
+                header += `<a href="${patchLink}" class="permalink-icon" onclick="copyToClipboard('${patchLink}'); return false;" title="Copy permalink to this patch">
+                    <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="m7.775 3.275 1.25-1.25a3.5 3.5 0 1 1 4.95 4.95l-2.5 2.5a3.5 3.5 0 0 1-4.95 0 .751.751 0 0 1 .018-1.042.751.751 0 0 1 1.042-.018 1.998 1.998 0 0 0 2.83 0l2.5-2.5a2.002 2.002 0 0 0-2.83-2.83l-1.25 1.25a.751.751 0 0 1-1.042-.018.751.751 0 0 1-.018-1.042Zm-4.69 9.64a1.998 1.998 0 0 0 2.83 0l1.25-1.25a.751.751 0 0 1 1.042.018.751.751 0 0 1 .018 1.042l-1.25 1.25a3.5 3.5 0 1 1-4.95-4.95l2.5-2.5a3.5 3.5 0 0 1 4.95 0 .751.751 0 0 1-.018 1.042.751.751 0 0 1-1.042.018 1.998 1.998 0 0 0-2.83 0l-2.5 2.5a1.998 1.998 0 0 0 0 2.83Z"></path></svg>
+                </a>`;
+
+                let totalTokens = 0;
+                reviews.forEach(r => totalTokens += (r.tokens_in || 0) + (r.tokens_out || 0) + (r.tokens_cached || 0));
+
+                const borderStyle = '';
+
+                let statusHtml = '';
+                if (patch && (patch.status === 'error' || patch.status === 'failed')) {
+                     statusHtml = `<div style="background:var(--error-bg); border:1px solid var(--error-border); color:var(--error-text); padding:8px; border-radius:4px; margin-bottom:8px; font-family:monospace; white-space:pre-wrap; font-size:0.9em;"><strong>Patch Application Failed:</strong>\n${escapeHtml(patch.apply_error || 'Unknown error')}</div>`;
+                }
+
+                let emailHtml = '';
+                if (patch) {
+                    let toAddrs = patch.email_to || '';
+                    let ccAddrs = patch.email_cc || '';
+                    let eStatus = patch.email_status;
+
+                    if (!data.smtp_enabled) {
+                        eStatus = 'Disabled (SMTP not configured)';
+                    } else if (data.dry_run) {
+                        eStatus = eStatus ? `Dry-run (${eStatus})` : 'Dry-run (Not sent)';
+                    } else {
+                        eStatus = eStatus || 'None';
+                    }
+
+                    try { if (toAddrs.startsWith('[')) toAddrs = JSON.parse(toAddrs).join(', '); } catch(e) {}
+                    try { if (ccAddrs.startsWith('[')) ccAddrs = JSON.parse(ccAddrs).join(', '); } catch(e) {}
+
+                    emailHtml = `
+                        <div style="font-size: 0.9em; color: var(--text-muted); line-height: 1.4; word-break: break-all;">
+                            <strong>To:</strong> ${escapeHtml(toAddrs || 'None')} &nbsp;&nbsp; 
+                            <strong>Cc:</strong> ${escapeHtml(ccAddrs || 'None')} &nbsp;&nbsp; 
+                            <strong>Status:</strong> ${escapeHtml(eStatus)}
+                        </div>
+                    `;
+                }
+
+                let listHtml = '';
+                if (patch && patch.status === 'Skipped') {
+                    listHtml = `<p style="font-style:italic; color:#888;">Skipped.</p>`;
+                } else if (reviews && reviews.length > 0 && reviews.every(r => r.status === 'Skipped')) {
+                    const reason = reviews[0].result || 'Skipped.';
+                    listHtml = `<p style="font-style:italic; color:#888;">${escapeHtml(reason)}</p>`;
+                } else {
+                    listHtml = renderReviewList(reviews, emailHtml, patch ? patch.status : null);
+                }
+
+                reviewsHtml += `
+                    <div id="patch-${pid}" ${patch ? `data-part="${patch.part_index}"` : ''} style="margin-top:12px; ${borderStyle}">
+                        <h3 style="display:flex; justify-content:space-between;">
+                            <span>${header}</span>
+                        </h3>
+                        ${statusHtml}
+                        ${listHtml}
+                    </div>
+                `;
+
+                if (sortedPatchIds.length > 1) {
+                    let summaryStatus = '';
+
+                    if (patch && (patch.status === 'error' || patch.status === 'failed')) {
+                        summaryStatus = `<span style="color:var(--error-text); font-weight:bold">Apply Failed</span>`;
+                    } else if (patch && patch.status === 'Skipped') {
+                        summaryStatus = '<span style="color:#888">Skipped</span>';
+                    } else if (!reviews || reviews.length === 0) {
+                        summaryStatus = '<span style="color:#888">No reviews</span>';
+                    } else {                         // Aggregate "MAX" across all reviews for this patch
+                        let maxCounts = { low: 0, medium: 0, high: 0, critical: 0 };
+                        let hasSuccessful = false;
+                        let hasSkipped = false;
+                        let hasInProgress = false;
+                        let skippedReason = '';
+                        let errors = [];
+
+                        let validRunCount = 0;
+                        reviews.forEach(r => {
+                           if (r.status !== 'Failed To Apply') {
+                               validRunCount++;
+                           }
+
+                           if (r.status === 'Reviewed') {
+                               hasSuccessful = true;
+                               let current = { low: 0, medium: 0, high: 0, critical: 0 };
+                               try {
+                                   if (Array.isArray(r.findings) && r.findings.length > 0) {
+                                       current = countFindingsBySeverity(r.findings);
+                                   } else if (r.output) {
+                                       const out = typeof r.output === 'string' ? JSON.parse(r.output) : r.output;
+                                       if (out && out.findings && Array.isArray(out.findings)) {
+                                           current = countFindingsBySeverity(out.findings);
+                                       }
+                                   }
+                               } catch (e) {}
+
+                               // Max aggregation
+                               maxCounts.critical = Math.max(maxCounts.critical, current.critical);
+                               maxCounts.high = Math.max(maxCounts.high, current.high);
+                               maxCounts.medium = Math.max(maxCounts.medium, current.medium);
+                               maxCounts.low = Math.max(maxCounts.low, current.low);
+                           } else if (r.status === 'Skipped') {
+                               hasSkipped = true;
+                               skippedReason = r.result || 'Skipped';
+                           } else if (r.status && (r.status.toLowerCase().includes('failed') || r.status.toLowerCase().includes('error'))) {
+                               errors.push(r.status);
+                           } else if (r.status === 'Pending' || r.status === 'In Review') {
+                               hasInProgress = true;
+                           }
+                        });
+
+                        if (hasSuccessful) {
+                           summaryStatus = renderFindingsBadges(maxCounts, 'Reviewed');
+                           if (validRunCount > 1) {
+                               summaryStatus += ` <span style="color:#888; font-size:0.85em; font-style:italic;">(max of ${validRunCount} runs)</span>`;
+                           }
+                        } else if (errors.length > 0) {
+                           summaryStatus = `<span style="color:var(--error-text); font-weight:bold">${escapeHtml(errors[0])}</span>`;
+                        } else if (hasSkipped && !hasInProgress) {
+                           // Only skipped
+                           summaryStatus = `<span style="color:#888" title="${escapeHtml(skippedReason)}">Skipped</span>`;
+                        } else {
+                           summaryStatus = '<span style="color:#888">In progress...</span>';
+                        }
+                    }
+                    const patchLabel = patch ? `Patch ${patch.part_index}` : `Patch ${pid}`;
+                    const patchSubject = patch ? escapeHtml(patch.subject || '(no subject)') : '';
+                    summaryHtml += `<tr onclick="document.getElementById('patch-${pid}').scrollIntoView({behavior: 'smooth'})" style="cursor:pointer"><td><strong>${patchLabel}</strong>: ${patchSubject}</td><td>${summaryStatus}</td></tr>`;
+                }
+            });
+
+            if (sortedPatchIds.length > 1) {
+                summaryHtml += '</tbody></table>';
+            }
+
+            if (!reviewsHtml) reviewsHtml = '<p>No AI reviews yet.</p>';
+
+            let paginationHtml = '';
+            if (data.total_patches_in_db > data.limit) {
+                const totalPages = Math.ceil(data.total_patches_in_db / data.limit);
+                const basePath = `#/patchset/${encodeURIComponent(data.id || data.message_id)}`;
+                
+                paginationHtml = `
+                    <div class="pagination">
+                        <button onclick="navigate('${basePath}?page=1&limit=${data.limit}')" ${data.page <= 1 ? 'disabled' : ''}>First</button>
+                        <button onclick="navigate('${basePath}?page=${data.page - 1}&limit=${data.limit}')" ${data.page <= 1 ? 'disabled' : ''}>Prev</button>
+                        <span>Page ${data.page} of ${totalPages} (${data.total_patches_in_db} total)</span>
+                        <button onclick="navigate('${basePath}?page=${data.page + 1}&limit=${data.limit}')" ${data.page >= totalPages ? 'disabled' : ''}>Next</button>
+                        <button onclick="navigate('${basePath}?page=${totalPages}&limit=${data.limit}')" ${data.page >= totalPages ? 'disabled' : ''}>Last</button>
+                    </div>
+                `;
+            }
+
+            // Only show baseline/thread section if NOT a direct git submission (heuristic: message_id is SHA or synthetic local ID or subject indicates git import)
+            const isGitSubmission = (data.message_id && (/^[0-9a-f]{40}$/.test(data.message_id) || data.message_id.includes('@sashiko.local'))) || (data.subject && data.subject.startsWith('Git Import:'));
+
+            const threadHtml = isGitSubmission ? '' : renderThreadTree(data.thread);
+            const subsystemsHtml = data.subsystems?.length > 0
+                ? data.subsystems.map(s => `<span class="tag">${escapeHtml(s)}</span>`).join('')
+                : '-';
+
+            let failureHtml = '';
+            if (data.failed_reason) {
+                failureHtml = `
+                    <div class="section" style="background:var(--error-bg); border:1px solid var(--error-border); padding:12px; border-radius:4px; margin-bottom:16px;">
+                        <h3 style="margin-top:0; color:var(--error-title);">Ingestion Failed</h3>
+                        <div style="color:#d32f2f;">${escapeHtml(data.failed_reason)}</div>
+                    </div>
+                `;
+            }
+
+            const modelName = data.model_name || '-';
+            const providerModel = data.provider ? `${data.provider}/${modelName}` : modelName;
+            const promptsHash = data.prompts_git_hash ? data.prompts_git_hash.substring(0, 8) : '-';
+            
+            let baselineStr = '-';
+            if (data.baseline) {
+                 const parts = [];
+                 if (data.baseline.branch) parts.push(data.baseline.branch);
+                 if (data.baseline.commit) parts.push(data.baseline.commit.substring(0, 8));
+                 if (parts.length > 0) baselineStr = parts.join(' / ');
+            }
+
+            let baselineLogsHtml = '';
+            
+            if (data.baseline_logs && !isGitSubmission) {
+                 const logId = 'baseline-logs-' + Math.random().toString(36).substr(2, 9);
+                 let contentHtml = '';
+                 let isJson = false;
+                 
+                 try {
+                     const logs = JSON.parse(data.baseline_logs);
+                     if (Array.isArray(logs)) {
+                         isJson = true;
+                         // Render table
+                         contentHtml = `
+                            <table style="width:100%; border-collapse:collapse; margin-top:8px;">
+                                <thead>
+                                    <tr style="background:var(--code-bg);">
+                                        <th style="text-align:left; padding:6px; border-bottom:1px solid #d0d7de;">Baseline</th>
+                                        <th style="text-align:left; padding:6px; border-bottom:1px solid #d0d7de; width:100px;">Status</th>
+                                        <th style="text-align:right; padding:6px; border-bottom:1px solid #d0d7de; width:120px;">Log</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                         `;
+                         
+                         logs.forEach((item, idx) => {
+                             const rowId = `bl-log-${logId}-${idx}`;
+                             let statusBadge = '';
+                             if (item.status === 'Applied') {
+                                 statusBadge = '<span class="status-badge status-Applied">Applied</span>';
+                             } else {
+                                 statusBadge = '<span class="status-badge status-Failed">Failed</span>';
+                             }
+                             
+                             contentHtml += `
+                                <tr>
+                                    <td style="padding:6px; border-bottom:1px solid #eee;">${escapeHtml(item.baseline)}</td>
+                                    <td style="padding:6px; border-bottom:1px solid #eee;">${statusBadge}</td>
+                                    <td style="padding:6px; border-bottom:1px solid #eee; text-align:right;">
+                                        <a href="#/log/baseline/${encodeURIComponent(data.id || data.message_id)}/${idx}" style="font-weight:600; color:#666; text-decoration:none; font-size:0.85em;" onmouseover="this.style.color='#007bff'" onmouseout="this.style.color='#666'">View Log</a>
+                                    </td>
+                                </tr>
+                             `;
+                         });
+                         
+                         contentHtml += '</tbody></table>';
+                     }
+                 } catch (e) {
+                     // Fallback to text
+                 }
+
+                 if (!isJson) {
+                     const formattedLogs = escapeHtml(data.baseline_logs)
+                        .replace(/ - passed/g, ' - <span style="color:#2e7d32; font-weight:bold">passed</span>')
+                        .replace(/ - failed/g, ' - <span style="color:var(--error-text); font-weight:bold">failed</span>')
+                        .replace(/Application successful./g, '<span style="color:#2e7d32; font-weight:bold">Application successful.</span>')
+                        .replace(/Application failed./g, '<span style="color:var(--error-text); font-weight:bold">Application failed.</span>');
+                     
+                     contentHtml = `<div class="log-block" style="max-height:300px;">${formattedLogs}</div>`;
+                 }
+
+                 baselineLogsHtml = `
+                    <div class="section">
+                        <h2 style="display:flex; align-items:center; gap:10px;">
+                            Baseline
+                            <button class="toggle-btn" onclick="toggleCollapsible('${logId}', this)" style="font-size:0.8em; font-weight:normal;">▶ Show Details</button>
+                        </h2>
+                        <div class="kv"><div class="label">Selected:</div><div>${baselineStr}</div></div>
+                        <div id="${logId}" class="collapsible">
+                            ${contentHtml}
+                        </div>
+                    </div>
+                 `;
+            }
+
+            let currentStatus = data.status || 'Pending';
+
+            document.getElementById('app').innerHTML = `
+                <div class="nav"><a href="#/" onclick="event.preventDefault(); goBack();">← Back</a></div>
+                <h1>
+                    <span>${escapeHtml(data.subject) || '(no subject)'}</span>
+                    <span class="status-badge status-${currentStatus.replace(/ /g, '')}">${currentStatus}</span>
+                </h1>
+                
+                ${failureHtml}
+
+                <div class="section">
+                    <div class="kv"><div class="label">Author:</div><div>${(() => {
+                        const a = parseAuthor(data.author);
+                        return escapeHtml(a.name ? `${a.name} <${a.email}>` : a.email);
+                    })()}</div></div>
+                    <div class="kv"><div class="label">Date:</div><div>${date}</div></div>
+                    <div class="kv"><div class="label">Subsystems:</div><div>${subsystemsHtml}</div></div>
+                    <div class="kv"><div class="label">Patches:</div><div>${data.received_parts || 0} / ${data.total_parts || 0}</div></div>
+                    <div class="kv"><div class="label">Model:</div><div>${escapeHtml(providerModel)}</div></div>
+                    <div class="kv"><div class="label">AOS AI Maintainer ver.:</div><div>${escapeHtml(promptsHash)}</div></div>
+                    ${reviewDuration ? `<div class="kv"><div class="label">检视时长:</div><div>${escapeHtml(reviewDuration)}</div></div>` : ''}
+                </div>
+                
+                ${threadHtml ? `<div class="section">
+                    <h2>Thread</h2>
+                    ${threadHtml}
+                </div>` : ''}
+
+                ${baselineLogsHtml}
+                
+                <div class="section">
+                    <h2 id="ai-reviews">AI Reviews</h2>
+                    ${summaryHtml}
+                    ${reviewsHtml}
+                    ${paginationHtml}
+                </div>
+            `;
+
+            if (query.patch || query.part) {
+                setTimeout(() => {
+                    let el = null;
+                    if (query.patch) {
+                        el = document.getElementById(`patch-${query.patch}`);
+                    }
+                    if (!el && query.part) {
+                        el = document.querySelector(`[data-part="${query.part}"]`);
+                    }
+                    if (el) {
+                        el.scrollIntoView({behavior: 'smooth', block: 'center'});
+                        const origBg = el.style.backgroundColor;
+                        el.style.backgroundColor = 'var(--selected-bg)';
+                        el.style.transition = 'background-color 1.5s ease-out';
+                        setTimeout(() => {
+                            el.style.backgroundColor = origBg;
+                        }, 2000);
+                    }
+                }, 100);
+            }
+        }
+
+        // =====================================================================
+        // BASELINE LOG VIEW
+        // =====================================================================
+        async function renderBaselineLogView(id, idx) {
+            const res = await fetch(`/api/patchset?id=${encodeURIComponent(id)}`);
+            if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+            const data = await res.json();
+
+            let logContent = 'Log not found';
+            let baselineName = '-';
+            let status = '-';
+
+            try {
+                const logs = JSON.parse(data.baseline_logs);
+                if (Array.isArray(logs) && logs[idx]) {
+                    logContent = logs[idx].log || '(empty log)';
+                    baselineName = logs[idx].baseline || '-';
+                    status = logs[idx].status || '-';
+                }
+            } catch (e) {
+                logContent = 'Failed to parse baseline logs';
+            }
+
+            document.getElementById('app').innerHTML = `
+                <div class="nav"><a href="#/" onclick="event.preventDefault(); goBack();">← Back</a></div>
+                <h1>
+                    <span>Baseline Application Log</span>
+                    <span style="font-size:0.7em; font-weight:normal; color:#888;">
+                        ${escapeHtml(baselineName)} · 
+                        <span class="status-badge status-${(status || '').replace(/ /g, '')}">${status}</span>
+                    </span>
+                </h1>
+                <div class="section">
+                    <div class="log-block" style="max-height: none;">${escapeHtml(logContent)}</div>
+                </div>
+            `;
+        }
+
+        function activeFindings(findings) {
+            return (findings || []).filter(f => (f.triage_status || 'pending') !== 'not_issue');
+        }
+
+        function countFindingsBySeverity(findings) {
+            const counts = { low: 0, medium: 0, high: 0, critical: 0 };
+            activeFindings(findings).forEach(f => {
+                if (f.preexisting) return; // Exclude pre-existing findings from summary severity counts
+                const s = String(f.severity || '').toLowerCase();
+                if (s === 'critical') counts.critical++;
+                else if (s === 'high') counts.high++;
+                else if (s === 'medium') counts.medium++;
+                else counts.low++;
+            });
+            return counts;
+        }
+
+        function triageLabel(status) {
+            if (status === 'pending') return '待确认';
+            if (status === 'not_issue') return '非问题';
+            if (status === 'fixed') return '已修复';
+            return '待修复';
+        }
+
+        function isImportedPlaceholderExplanation(text) {
+            return /^Imported (low|medium|high|critical) finding #\d+ from sashiko\.dev\.?$/i.test(String(text || '').trim());
+        }
+
+        async function saveFindingTriage(findingId, uniqueId) {
+            const statusEl = document.getElementById(`triage-status-${uniqueId}`);
+            const commentEl = document.getElementById(`triage-comment-${uniqueId}`);
+            const saveEl = document.getElementById(`triage-save-${uniqueId}`);
+            const messageEl = document.getElementById(`triage-message-${uniqueId}`);
+
+            saveEl.disabled = true;
+            messageEl.textContent = 'Saving...';
+
+            try {
+                const res = await fetch('/api/finding/triage', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        id: findingId,
+                        status: statusEl.value,
+                        comment: commentEl.value
+                    })
+                });
+
+                if (!res.ok) {
+                    if (res.status === 403) {
+                        throw new Error('当前服务以只读模式启动，去掉 --no-api 后才能保存。');
+                    }
+                    throw new Error(`保存失败: HTTP ${res.status}`);
+                }
+
+                messageEl.textContent = 'Saved';
+                await renderPatchsetView(state.patchsetId, {
+                    page: state.patchsetPage,
+                    limit: state.patchsetLimit
+                });
+            } catch (e) {
+                messageEl.textContent = e.message || String(e);
+                saveEl.disabled = false;
+            }
+        }
+
+        async function deleteTriageComment(commentId) {
+            if (!confirm('删除这条评论？')) return;
+
+            const res = await fetch('/api/finding/comment/delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: commentId })
+            });
+
+            if (!res.ok) {
+                if (res.status === 403) {
+                    alert('当前服务以只读模式启动，去掉 --no-api 后才能删除。');
+                } else {
+                    alert(`删除失败: HTTP ${res.status}`);
+                }
+                return;
+            }
+
+            await renderPatchsetView(state.patchsetId, {
+                page: state.patchsetPage,
+                limit: state.patchsetLimit
+            });
+        }
+
+        function renderReviewCard(r, emailHtml = '') {
+            const uniqueId = Math.random().toString(36).substr(2, 9);
+
+            let displayResult = '';
+            let structuredFindings = [];
+            
+            // 1. Try to parse output for structured findings
+            let parsedFindings = false;
+            try {
+                if (Array.isArray(r.findings) && r.findings.length > 0) {
+                    structuredFindings = r.findings;
+                }
+                if (r.output) {
+                    let outputJson = null;
+                    if (typeof r.output === 'string') {
+                        outputJson = JSON.parse(r.output);
+                    } else if (typeof r.output === 'object') {
+                        outputJson = r.output;
+                    }
+
+                    // Findings
+                    if (structuredFindings.length === 0 && outputJson && outputJson.findings && Array.isArray(outputJson.findings)) {
+                        structuredFindings = outputJson.findings;
+                    }
+                }
+
+                if (structuredFindings.length > 0) {
+                    const counts = countFindingsBySeverity(structuredFindings);
+                    const total = counts.low + counts.medium + counts.high + counts.critical;
+                    displayResult = total === 0
+                        ? '<span style="color:#2e7d32;font-weight:bold;">No active regressions</span>'
+                        : [
+                            `Critical: <span style="${counts.critical > 0 ? 'color:#B71C1C;font-weight:bold' : 'color:var(--text-dim)'}">${counts.critical}</span>`,
+                            `High: <span style="${counts.high > 0 ? 'color:#FF5722;font-weight:bold' : 'color:var(--text-dim)'}">${counts.high}</span>`,
+                            `Medium: <span style="${counts.medium > 0 ? 'color:#FF9800;font-weight:bold' : 'color:var(--text-dim)'}">${counts.medium}</span>`,
+                            `Low: <span style="${counts.low > 0 ? 'color:#FBC02D;font-weight:bold' : 'color:var(--text-dim)'}">${counts.low}</span>`
+                        ].join(' · ');
+                    parsedFindings = true;
+                }
+            } catch (e) { }
+
+            // 2. If no structured findings, fallback to r.result
+            if (!parsedFindings) {
+                const rawResult = r.result || 'Finished';
+                if (rawResult === "Review completed successfully.") {
+                     displayResult = '<span style="color:#2e7d32;font-weight:bold;">No regressions</span>';
+                } else {
+                    // Check for "garbage" (long JSON or similar)
+                    if (rawResult.trim().startsWith('{') || rawResult.length > 60) {
+                         displayResult = `<span style="color:#666; font-style:italic;" title="${escapeHtml(rawResult)}">See log for details</span>`;
+                    } else {
+                         displayResult = `<span style="font-weight:bold;">${escapeHtml(rawResult)}</span>`;
+                    }
+                }
+            }
+
+            const tokensOut = (r.tokens_out || 0);
+            const tokensCached = (r.tokens_cached || 0);
+            const tokensIn = Math.max(0, (r.tokens_in || 0) - tokensCached);
+            const tokenStr = `In: ${tokensIn.toLocaleString()} &middot; Cached: ${tokensCached.toLocaleString()} &middot; Out: ${tokensOut.toLocaleString()}`;
+
+            let findingsHtml = '';
+            if (structuredFindings.length > 0) {
+                findingsHtml = `
+                    <div class="findings-list">
+                        ${structuredFindings.map((f, idx) => {
+                            const severityRaw = String(f.severity || 'Low');
+                            const severity = severityRaw.toLowerCase();
+                            const severityClass = ['critical', 'high', 'medium', 'low'].includes(severity) ? severity : 'low';
+                            const label = severityClass.charAt(0).toUpperCase() + severityClass.slice(1);
+                            const problem = f.problem || f.description || f.message || '(no problem text)';
+                            const explanationRaw = f.severity_explanation || f.reasoning || '';
+                            const explanation = isImportedPlaceholderExplanation(explanationRaw) ? '' : explanationRaw;
+                            const triageStatus = f.triage_status || 'pending';
+                            const findingKey = `${uniqueId}-${idx}`;
+                            const triageComments = Array.isArray(f.triage_comments) ? f.triage_comments : [];
+                            const commentsHtml = triageComments.length > 0 ? `
+                                <div class="triage-comments">
+                                    ${triageComments.map(c => `
+                                        <div class="triage-comment">
+                                            <div class="triage-comment-meta">
+                                                <span>${triageLabel(c.status || 'pending')} · ${c.created_at ? formatDate(c.created_at, true) : '-'}</span>
+                                                ${c.id ? `<button class="triage-comment-delete" onclick="deleteTriageComment(${c.id})">Delete</button>` : ''}
+                                            </div>
+                                            <div class="triage-comment-body">${escapeHtml(c.comment || '', true, true)}</div>
+                                        </div>
+                                    `).join('')}
+                                </div>
+                            ` : '';
+                            return `
+                                <div class="finding-item">
+                                    <div class="finding-header">
+                                        <span class="severity-badge severity-${severityClass}">${label}</span>
+                                        <span>Finding ${idx + 1}</span>
+                                        <span class="triage-badge triage-${triageStatus}">${triageLabel(triageStatus)}</span>
+                                    </div>
+                                    <div class="finding-body">${escapeHtml(problem, true, true)}</div>
+                                    ${explanation ? `<div class="finding-explanation"><strong>Why ${label}:</strong> ${escapeHtml(explanation, true, true)}</div>` : ''}
+                                    ${f.id ? `
+                                        <div class="finding-triage">
+                                            <div class="finding-triage-row">
+                                                <label for="triage-status-${findingKey}"><strong>人工确认:</strong></label>
+                                                <select id="triage-status-${findingKey}">
+                                                    <option value="pending" ${triageStatus === 'pending' ? 'selected' : ''}>待确认</option>
+                                                    <option value="not_issue" ${triageStatus === 'not_issue' ? 'selected' : ''}>非问题</option>
+                                                    <option value="to_fix" ${triageStatus === 'to_fix' ? 'selected' : ''}>待修复</option>
+                                                    <option value="fixed" ${triageStatus === 'fixed' ? 'selected' : ''}>已修复</option>
+                                                </select>
+                                                <button id="triage-save-${findingKey}" onclick="saveFindingTriage(${f.id}, '${findingKey}')">Save</button>
+                                                <span id="triage-message-${findingKey}" style="color:var(--text-muted); font-size:0.9em;"></span>
+                                            </div>
+                                            ${commentsHtml}
+                                            <textarea id="triage-comment-${findingKey}" placeholder="新增评价 / 备注"></textarea>
+                                        </div>
+                                    ` : ''}
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+                `;
+            }
+
+            let inlineHtml = '';
+            if (r.inline_review) {
+                // If we found issues (parsedFindings is true and result isn't "No regressions"), expand by default
+                const hasIssues = structuredFindings.length > 0 || (parsedFindings && !displayResult.includes('No regressions'));
+                const isOpen = hasIssues ? 'open' : '';
+                const icon = hasIssues ? '▼' : '▶';
+                inlineHtml = `
+                    <div style="margin-top:8px;">
+                        <button class="toggle-btn" onclick="toggleCollapsible('inline-${uniqueId}', this)">${icon} Inline Review</button>
+                        <div id="inline-${uniqueId}" class="collapsible ${isOpen}" style="position: relative;">
+                            <button class="copy-btn" style="position: absolute; top: 5px; right: 5px; z-index: 10;" onclick="copyToClipboard(this.nextElementSibling.innerText)">Copy</button>
+                            <div class="log-inline-block">${escapeHtml(r.inline_review, true, true)}</div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            const statusRaw = r.status || 'Finished';
+            const s = statusRaw.toLowerCase();
+            const showDetails = s === 'reviewed' || s === 'finished' || s === 'failed' || s === 'skipped';
+
+            return `
+                <div class="review-card">
+                    <div class="review-meta">
+                        ${showDetails ? `
+                        <div class="review-meta-label">Result:</div>
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <span>${displayResult}</span>
+                            <span class="status-badge status-${(statusRaw || '').replace(/ /g, '')}">${statusRaw}</span>
+                        </div>
+                        ` : `
+                        <div class="review-meta-label">Status:</div>
+                        <div><span class="status-badge status-${(statusRaw || '').replace(/ /g, '')}">${statusRaw}</span></div>
+                        `}
+                    </div>
+                    ${showDetails ? `
+                    ${findingsHtml}
+                    ${inlineHtml}
+                    <div style="margin-top: 24px; margin-bottom: 0;">
+                        ${emailHtml}
+                        <div style="font-size: 0.9em; color: var(--text-muted); line-height: 1.4; margin-top: 2px;">
+                            <strong>Tokens used:</strong> ${tokenStr}
+                        </div>
+                    </div>
+                    <div style="margin-top:8px; display:flex; justify-content:space-between; align-items:center; font-size: 0.9em;">
+                        ${r.id ? `<a href="#/log/${r.id}" style="font-weight:600; color:var(--text-dim); text-decoration:none;" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">View Raw Log</a>` : '<span></span>'}
+                        <a href="javascript:void(0)" onclick="document.getElementById('ai-reviews').scrollIntoView({behavior: 'smooth'})" style="font-size: 0.95em; color: var(--text-dim); text-decoration: none;">↑ Back to Summary</a>
+                    </div>
+                    ` : ''}
+                </div>
+            `;
+        }
+
+        function renderThreadTree(thread) {
+            if (!thread || thread.length === 0) return '<p style="font-style:italic; color:#888;">No thread history.</p>';
+
+            const msgMap = new Map();
+            const childrenMap = new Map();
+            thread.forEach(m => {
+                msgMap.set(m.message_id, m);
+                childrenMap.set(m.message_id, []);
+            });
+
+            const roots = [];
+            thread.forEach(m => {
+                const parentId = m.in_reply_to;
+                if (parentId && msgMap.has(parentId)) {
+                    childrenMap.get(parentId).push(m);
+                } else {
+                    roots.push(m);
+                }
+            });
+
+            let html = '<div class="thread-tree"><ul>';
+            function renderNode(m, depth) {
+                const mDate = m.date ? formatDate(m.date) : '-';
+                const arrow = depth > 0 ? '↳ ' : '';
+                const author = parseAuthor(m.author);
+                const authorStr = author.name ? `${author.name} <${author.email}>` : author.email;
+                html += `<li>${arrow}<span class="date">[${mDate}]</span> ${escapeHtml(authorStr)}: <a href="#/message/${encodeURIComponent(m.message_id)}">${escapeHtml(m.subject || '(no subject)')}</a>`;
+                const children = childrenMap.get(m.message_id) || [];
+                if (children.length > 0) {
+                    html += '<ul>';
+                    children.forEach(c => renderNode(c, depth + 1));
+                    html += '</ul>';
+                }
+                html += '</li>';
+            }
+            roots.forEach(r => renderNode(r, 0));
+            html += '</ul></div>';
+            return html;
+        }
+
+        // =====================================================================
+        // MESSAGE VIEW
+        // =====================================================================
+        async function renderMessageView(id) {
+            const res = await fetch(`/api/message?id=${encodeURIComponent(id)}`);
+            if (!res.ok) throw new Error('Message not found');
+            const data = await res.json();
+
+            document.title = `AOS AI Maintainer - ${data.subject}`;
+            const date = formatDate(data.date, true);
+            
+            // Heuristic: message_id is SHA or synthetic local ID means it's a direct git submission
+            const isGitSubmission = data.message_id && (/^[0-9a-f]{40}$/.test(data.message_id) || data.message_id.includes('@sashiko.local'));
+            const threadHtml = (!isGitSubmission && data.thread?.length > 0) ? renderThreadTreeWithCurrent(data.thread, data.message_id) : '';
+
+            document.getElementById('app').innerHTML = `
+                <div class="nav"><a href="#/" onclick="event.preventDefault(); goBack();">← Back</a></div>
+                <h1>${escapeHtml(data.subject) || '(no subject)'}</h1>
+                
+                <div class="message-meta">
+                    <div><span class="label">From:</span> ${(() => {
+                        const a = parseAuthor(data.author);
+                        return escapeHtml(a.name ? `${a.name} <${a.email}>` : a.email);
+                    })()}</div>
+                    <div><span class="label">To:</span> ${escapeHtml(formatAuthorList(data.to))}</div>
+                    <div><span class="label">Cc:</span> ${escapeHtml(formatAuthorList(data.cc))}</div>
+                    <div><span class="label">Date:</span> ${date}</div>
+                    <div><span class="label">ID:</span> ${escapeHtml(data.message_id)} <button class="copy-btn" onclick="copyToClipboard('${escapeHtml(data.message_id)}')">Copy</button></div>
+                </div>
+                
+                ${threadHtml ? `<div class="section"><h2>Thread</h2>${threadHtml}</div>` : ''}
+                
+                <pre class="body"><div style="font-weight: bold; color: var(--text);">${escapeHtml(data.subject || '(no subject)')}</div>
+${escapeHtml((data.body || '(no body)').replace(/\n+$/, ''), true, false)}${data.diff ? '\n\n' + escapeHtml(data.diff, true) : ''}</pre>
+            `;
+        }
+
+        function renderThreadTreeWithCurrent(thread, currentMsgId) {
+            if (!thread || thread.length === 0) return '';
+
+            const msgMap = new Map();
+            const childrenMap = new Map();
+            thread.forEach(m => {
+                msgMap.set(m.message_id, m);
+                childrenMap.set(m.message_id, []);
+            });
+
+            const roots = [];
+            thread.forEach(m => {
+                const parentId = m.in_reply_to;
+                if (parentId && msgMap.has(parentId)) {
+                    childrenMap.get(parentId).push(m);
+                } else {
+                    roots.push(m);
+                }
+            });
+
+            let html = '<div class="thread-tree"><ul>';
+            function renderNode(m, depth) {
+                const mDate = m.date ? formatDate(m.date) : '-';
+                const arrow = depth > 0 ? '↳ ' : '';
+                const isCurrent = m.message_id === currentMsgId;
+                const style = isCurrent ? 'class="current"' : '';
+                const author = parseAuthor(m.author);
+                const authorStr = author.name ? `${author.name} <${author.email}>` : author.email;
+                html += `<li>${arrow}<span class="date">[${mDate}]</span> ${escapeHtml(authorStr)}: <a href="#/message/${encodeURIComponent(m.message_id)}" ${style}>${escapeHtml(m.subject || '(no subject)')}</a>`;
+                const children = childrenMap.get(m.message_id) || [];
+                if (children.length > 0) {
+                    html += '<ul>';
+                    children.forEach(c => renderNode(c, depth + 1));
+                    html += '</ul>';
+                }
+                html += '</li>';
+            }
+            roots.forEach(r => renderNode(r, 0));
+            html += '</ul></div>';
+            return html;
+        }
+
+        // =====================================================================
+        // LOG VIEW
+        // =====================================================================
+        async function renderLogView(id) {
+            const res = await fetch(`/api/review?id=${id}`);
+            if (!res.ok) throw new Error('Review not found');
+            const data = await res.json();
+
+            const totalTokens = (data.tokens_in || 0) + (data.tokens_out || 0) + (data.tokens_cached || 0);
+            let logs = [];
+            try { logs = JSON.parse(data.logs || '[]'); } catch (e) { }
+
+            let logsHtml = '';
+            if (!logs.length) {
+                logsHtml = '<div style="padding:20px; text-align:center; color:#888;">No logs recorded.</div>';
+            } else {
+                let jsonCounter = 0;
+                logsHtml = logs.map((entry, idx) => {
+                    const role = (entry.role || 'unknown').toLowerCase();
+                    const parts = entry.parts || [];
+                    let rowClass = 'log-entry';
+                    if (role === 'user') rowClass += ' role-user';
+                    else if (role === 'model' || role === 'assistant') rowClass += ' role-model';
+                    else if (role === 'tool' || role === 'function') rowClass += ' role-tool';
+                    else rowClass += ' role-system';
+
+                    let label = (role === 'model' || role === 'assistant') ? 'LLM' : (role === 'tool' || role === 'function') ? 'TOOL' : role.toUpperCase();
+
+                    let content = '';
+
+                    // Unified format: direct content and tool_calls
+                    if (entry.thought && typeof entry.thought === 'string') {
+                        content += `<div style="color: var(--thought-color); font-style: italic; border-left: 2px solid var(--thought-border); padding-left: 8px; margin: 4px 0; white-space: pre-wrap;">${escapeHtml(entry.thought)}</div>`;
+                    }
+                    
+                    if (entry.content && typeof entry.content === 'string') {
+                        if (role === 'tool') {
+                            content += formatJsonExpandable(entry.content, jsonCounter++);
+                        } else {
+                            content += `<div>${escapeHtml(entry.content)}</div>`;
+                        }
+                    }
+                    if (entry.tool_calls && Array.isArray(entry.tool_calls)) {
+                        entry.tool_calls.forEach(call => {
+                            const callId = jsonCounter++;
+                            content += formatFuncCallExpandable(call.function_name, call.arguments, callId);
+                        });
+                    }
+
+                    // Gemini format: parts array
+                    parts.forEach(part => {
+                        if (part.text) {
+                            if (part.thought) {
+                                content += `<div style="color: var(--thought-color); font-style: italic; border-left: 2px solid var(--thought-border); padding-left: 8px; margin: 4px 0; white-space: pre-wrap;">${escapeHtml(part.text)}</div>`;
+                            } else {
+                                content += `<div>${escapeHtml(part.text)}</div>`;
+                            }
+                        } else if (part.functionCall || part.function_call) {
+                            const fc = part.functionCall || part.function_call;
+                            const callId = jsonCounter++;
+                            const callHtml = formatFuncCallExpandable(fc.name, fc.args, callId);
+                            content += callHtml;
+                        } else if (part.functionResponse || part.function_response) {
+                            const fr = part.functionResponse || part.function_response;
+                            const respHtml = formatJsonExpandable(fr.response, jsonCounter++);
+                            content += `<div><span style="opacity:0.6">→ ${escapeHtml(fr.name)}:</span> ${respHtml}</div>`;
+                        }
+                    });
+
+                    return `<div class="${rowClass}"><div class="log-gutter">${label}</div><div class="log-content">${content}</div></div>`;
+                }).join('');
+            }
+
+            document.getElementById('app').innerHTML = `
+                <div class="nav"><a href="#/" onclick="event.preventDefault(); goBack();">← Back</a></div>
+                <h1>
+                    <span>Interaction Log</span>
+                    <span style="font-size:0.7em; font-weight:normal; color:#888;">
+                        ${data.model || '?'} · ${data.prompts_hash ? 'AOS AI Maintainer ver.: ' + data.prompts_hash.substring(0, 8) + ' · ' : ''}
+                        <span class="status-badge status-${(data.status || '').replace(/ /g, '')}">${data.status}</span>
+                    </span>
+                </h1>
+                <div>${logsHtml}</div>
+            `;
+        }
+
+        // Custom preview formatters for common tools
+        function getToolPreview(name, args) {
+            try {
+                switch (name) {
+                    case 'read_files': {
+                        const files = args.files || [];
+                        const mode = args.mode || 'raw';
+                        const fileStrs = files.map(f => {
+                            let s = `"${f.path}"`;
+                            if (f.start_line || f.end_line) {
+                                s += `::${f.start_line || ''}..${f.end_line || ''}`;
+                            }
+                            return s;
+                        });
+                        const filesPreview = fileStrs.length > 3 ? fileStrs.slice(0, 3).join(', ') + `, +${fileStrs.length - 3}` : fileStrs.join(', ');
+                        return mode !== 'raw' ? `${filesPreview}, mode=${mode}` : filesPreview;
+                    }
+                    case 'git_blame': {
+                        let s = `"${args.path}"`;
+                        if (args.start_line || args.end_line) {
+                            s += `::${args.start_line || ''}..${args.end_line || ''}`;
+                        }
+                        return s;
+                    }
+                    case 'git_diff': {
+                        const diffArgs = args.args || [];
+                        return diffArgs.map(a => `"${a}"`).join(' ');
+                    }
+                    case 'git_show': {
+                        let s = `"${args.object}"`;
+                        if (args.suppress_diff) s += ', no-diff';
+                        if (args.start_line || args.end_line) {
+                            s += `::${args.start_line || ''}..${args.end_line || ''}`;
+                        }
+                        return s;
+                    }
+                    case 'list_dir':
+                        return `"${args.path}"`;
+                    case 'write_file': {
+                        const contentLen = (args.content || '').length;
+                        return `"${args.path}", ${formatSize(contentLen)} content`;
+                    }
+                    case 'search_file_content': {
+                        let s = `"${args.pattern}"`;
+                        if (args.path && args.path !== '.') s += ` in "${args.path}"`;
+                        if (args.context_lines) s += ` ±${args.context_lines}`;
+                        return s;
+                    }
+                    case 'find_files': {
+                        let s = `"${args.pattern}"`;
+                        if (args.path && args.path !== '.') s += ` in "${args.path}"`;
+                        return s;
+                    }
+                    default:
+                        return null;
+                }
+            } catch (e) {
+                return null;
+            }
+        }
+
+        function formatFuncCallExpandable(name, args, id) {
+            if (typeof args === 'string') { try { args = JSON.parse(args); } catch (e) { } }
+            if (!args || typeof args !== 'object') {
+                return `<div><span class="fn-name">${escapeHtml(name)}</span>()</div>`;
+            }
+
+            let entries = Object.entries(args);
+            if (entries.length === 0) {
+                return `<div><span class="fn-name">${escapeHtml(name)}</span>()</div>`;
+            }
+
+            // Try custom preview first
+            let preview = getToolPreview(name, args);
+            if (!preview) {
+                if (typeof sortToolArgs === 'function') {
+                    entries = sortToolArgs(entries);
+                }
+                preview = entries.map(([k, v]) => {
+                    let valStr = JSON.stringify(v);
+                    if (valStr?.length > 40) valStr = valStr.substring(0, 37) + '...';
+                    return `${k}=${valStr}`;
+                }).join(', ');
+            }
+
+            const fullJson = JSON.stringify(args, null, 2);
+            const argsSize = formatSize(fullJson.length);
+
+            const expandId = `json-call-${id}`;
+            const shortPreview = preview.length > 80 ? preview.substring(0, 77) + '...' : preview;
+            return `<div class="json-expandable" onclick="toggleJsonExpand('${expandId}')"><span class="fn-name">${escapeHtml(name)}</span>(<span class="json-preview">${escapeHtml(shortPreview)}</span>) <span class="json-size">(${argsSize})</span><pre id="${expandId}" class="json-formatted" style="display:none">${formatJsonPretty(args)}</pre></div>`;
+        }
+
+        function formatFuncArgsExpandable(args, id) {
+            if (typeof args === 'string') { try { args = JSON.parse(args); } catch (e) { return escapeHtml(args); } }
+            if (!args || typeof args !== 'object') return '';
+
+            let entries = Object.entries(args);
+            if (typeof sortToolArgs === 'function') {
+                entries = sortToolArgs(entries);
+            }
+
+            const preview = entries.map(([k, v]) => {
+                let valStr = JSON.stringify(v);
+                if (valStr?.length > 40) valStr = valStr.substring(0, 37) + '...';
+                return `${k}=${valStr}`;
+            }).join(', ');
+
+            const fullJson = JSON.stringify(args, null, 2);
+            if (preview.length < 80 && !fullJson.includes('\\n') && !fullJson.includes('\\t')) {
+                return escapeHtml(preview);
+            }
+
+            const expandId = `json-args-${id}`;
+            return `<span class="json-expandable" onclick="toggleJsonExpand('${expandId}')"><span class="json-preview">${escapeHtml(preview.length > 80 ? preview.substring(0, 77) + '...' : preview)}</span><pre id="${expandId}" class="json-formatted" style="display:none">${formatJsonPretty(args)}</pre></span>`;
+        }
+
+        function formatJsonExpandable(obj, id) {
+            if (typeof obj === 'string') { try { obj = JSON.parse(obj); } catch (e) { } }
+            const jsonStr = JSON.stringify(obj);
+            const size = formatSize(jsonStr.length);
+            const sizeHtml = `<span class="json-size">(${size})</span>`;
+            const preview = jsonStr.length > 100 ? jsonStr.substring(0, 97) + '...' : jsonStr;
+
+            if (jsonStr.length <= 100 && !jsonStr.includes('\\n') && !jsonStr.includes('\\t')) {
+                return `${sizeHtml}${escapeHtml(preview)}`;
+            }
+
+            const expandId = `json-resp-${id}`;
+            return `${sizeHtml}<span class="json-expandable" onclick="toggleJsonExpand('${expandId}')"><span class="json-preview">${escapeHtml(preview)}</span><pre id="${expandId}" class="json-formatted" style="display:none">${formatJsonPretty(obj)}</pre></span>`;
+        }
+
+        function formatSize(bytes) {
+            if (bytes < 1024) return bytes + 'B';
+            return (bytes / 1024).toFixed(1) + 'KB';
+        }
+
+        function formatJsonPretty(obj) {
+            const formatted = JSON.stringify(obj, null, 2);
+            return escapeHtml(formatted).replace(/\\n/g, '\n').replace(/\\t/g, '    ');
+        }
+
+        function toggleJsonExpand(id) {
+            const el = document.getElementById(id);
+            el.style.display = el.style.display === 'none' ? 'block' : 'none';
+        }
+
+        // =====================================================================
+        // KEYBOARD NAVIGATION
+        // =====================================================================
+        document.addEventListener('keydown', (e) => {
+            const activeEl = document.activeElement;
+            const isInputFocused = activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA';
+
+            // Escape blurs inputs
+            if (e.key === 'Escape' && isInputFocused) {
+                activeEl.blur();
+                return;
+            }
+
+            // If input is focused, don't handle other keys
+            if (isInputFocused) return;
+
+            // Focus search with /
+            if (e.key === '/' && state.view === 'list') {
+                e.preventDefault();
+                const input = document.getElementById('searchInput');
+                if (input) { input.focus(); input.select(); }
+                return;
+            }
+
+            // List view navigation
+            if (state.view === 'list') {
+                const rows = document.querySelectorAll('#dataTable tbody tr');
+
+                if (e.key === 'j' || e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    state.selectedIndex = Math.min(state.selectedIndex + 1, rows.length - 1);
+                    updateRowSelection(rows);
+                } else if (e.key === 'k' || e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    state.selectedIndex = Math.max(state.selectedIndex - 1, 0);
+                    updateRowSelection(rows);
+                } else if ((e.key === 'Enter' || e.key === 'o') && state.selectedIndex >= 0 && rows[state.selectedIndex]) {
+                    e.preventDefault();
+                    rows[state.selectedIndex].click();
+                } else if (e.key === 'l' || e.key === 'ArrowRight') {
+                    if (state.currentPage < state.totalPages) changePage(1);
+                } else if (e.key === 'h' || e.key === 'ArrowLeft') {
+                    if (state.currentPage > 1) changePage(-1);
+                }
+            } else {
+                // Detail views: scroll and back
+                if (e.key === 'j' || (e.ctrlKey && e.key === 'n')) {
+                    window.scrollBy(0, 60);
+                } else if (e.key === 'k' || (e.ctrlKey && e.key === 'p')) {
+                    window.scrollBy(0, -60);
+                } else if (e.key === 'l' || e.key === 'ArrowRight') {
+                    if (state.view === 'patchset' && state.patchsetPage < state.patchsetTotalPages) {
+                        const basePath = `#/patchset/${encodeURIComponent(state.patchsetId)}`;
+                        navigate(`${basePath}?page=${state.patchsetPage + 1}&limit=${state.patchsetLimit}`);
+                    }
+                } else if (e.key === 'h' || e.key === 'ArrowLeft') {
+                    if (state.view === 'patchset' && state.patchsetPage > 1) {
+                        const basePath = `#/patchset/${encodeURIComponent(state.patchsetId)}`;
+                        navigate(`${basePath}?page=${state.patchsetPage - 1}&limit=${state.patchsetLimit}`);
+                    } else if (e.key === 'h') {
+                        e.preventDefault();
+                        goBack();
+                    }
+                } else if (e.key === 'q' || e.key === 'Backspace') {
+                    e.preventDefault();
+                    goBack();
+                } else if (e.key === 'g') {
+                    // gg = go to top (wait for second g)
+                    window.scrollTo(0, 0);
+                } else if (e.key === 'G') {
+                    window.scrollTo(0, document.body.scrollHeight);
+                }
+            }
+        });
+
+        function updateRowSelection(rows) {
+            rows.forEach((r, i) => {
+                if (i === state.selectedIndex) {
+                    r.classList.add('selected');
+                    r.scrollIntoView({ block: 'nearest' });
+                } else {
+                    r.classList.remove('selected');
+                }
+            });
+        }
+
+        // =====================================================================
+        // INIT
+        // =====================================================================
+        // =====================================================================
+        // STATS VIEW
+        // =====================================================================
+        async function renderStatsView() {
+            const app = document.getElementById('app');
+            app.innerHTML = `
+                <div class="nav"><a href="#/" onclick="event.preventDefault(); goBack();">← 返回</a></div>
+                <h1>统计</h1>
+                <div id="stats-content" class="loading">正在加载统计数据...</div>
+            `;
+
+            try {
+                const findings = await fetch('/api/stats/findings').then(r => r.json());
+
+                // HTML Structure
+                let html = '';
+                const total = findings.total || 0;
+                const pending = findings.pending || 0;
+                const notIssue = findings.not_issue || 0;
+                const toFix = findings.to_fix || 0;
+                const fixed = findings.fixed || 0;
+                const triaged = notIssue + toFix + fixed;
+                const confirmedIssues = toFix + fixed;
+                const actionQueue = pending + toFix;
+                const pct = (value, base = total) => base ? Math.round(value / base * 100) : 0;
+                const triageColors = {
+                    pending: '#d29922',
+                    not_issue: '#8b949e',
+                    to_fix: '#f85149',
+                    fixed: '#3fb950'
+                };
+                const triageItems = [
+                    { key: 'pending', label: '待确认', value: pending, color: triageColors.pending },
+                    { key: 'not_issue', label: '非问题', value: notIssue, color: triageColors.not_issue },
+                    { key: 'to_fix', label: '待修复', value: toFix, color: triageColors.to_fix },
+                    { key: 'fixed', label: '已修复', value: fixed, color: triageColors.fixed }
+                ];
+
+                html += '<h2>问题分诊</h2><div class="stat-card-grid">';
+                html += renderStatCard('问题总数', total);
+                html += renderStatCard('分诊完成率', pct(triaged) + '%');
+                html += renderStatCard('确认问题数', confirmedIssues);
+                html += renderStatCard('修复进度', pct(fixed, confirmedIssues) + '%');
+                html += renderStatCard('待处理队列', actionQueue);
+                html += '</div>';
+                html += `
+                    <div class="triage-formulas">
+                        <div class="triage-formula">
+                            <strong>分诊完成率 = (非问题 + 待修复 + 已修复) / 问题总数</strong>
+                            分子是已完成人工判断的 finding，分母是全部 finding。
+                        </div>
+                        <div class="triage-formula">
+                            <strong>确认问题数 = 待修复 + 已修复</strong>
+                            表示已经确认是有效问题的 finding，不包含非问题和待确认。
+                        </div>
+                        <div class="triage-formula">
+                            <strong>修复进度 = 已修复 / (待修复 + 已修复)</strong>
+                            分母是已确认的问题总数，分子是其中已经修复的问题。
+                        </div>
+                        <div class="triage-formula">
+                            <strong>待处理队列 = 待确认 + 待修复</strong>
+                            表示仍需要人工动作的 finding：要么需要确认，要么需要修复。
+                        </div>
+                    </div>
+                `;
+
+                html += `
+                    <div class="triage-dashboard">
+                        <div class="triage-panel">
+                            <h3>状态分布</h3>
+                            <div id="chart-triage-donut" class="triage-chart"></div>
+                        </div>
+                        <div class="triage-panel">
+                            <h3>状态明细</h3>
+                            <div class="triage-breakdown">
+                                ${triageItems.map(item => `
+                                    <div class="triage-breakdown-row">
+                                        <div class="triage-label">${escapeHtml(item.label)}</div>
+                                        <div class="triage-bar">
+                                            <div class="triage-bar-fill" style="width:${pct(item.value)}%; background:${item.color};"></div>
+                                        </div>
+                                        <div class="triage-value">${item.value} (${pct(item.value)}%)</div>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                    </div>
+                    <div class="triage-panel">
+                        <h3>整体分诊流向</h3>
+                        <div class="triage-stacked">
+                            ${triageItems.filter(item => item.value > 0).map(item => `
+                                <div class="triage-stacked-segment" title="${escapeHtml(item.label)}: ${item.value}" style="width:${pct(item.value)}%; background:${item.color};"></div>
+                            `).join('')}
+                        </div>
+                        <div class="triage-legend">
+                            ${triageItems.map(item => `
+                                <span class="triage-legend-item">
+                                    <span class="triage-swatch" style="background:${item.color};"></span>
+                                    ${escapeHtml(item.label)} ${item.value}
+                                </span>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+
+                const container = document.getElementById('stats-content');
+                container.innerHTML = html;
+                container.classList.remove('loading');
+
+                const chartEl = document.getElementById('chart-triage-donut');
+                if (chartEl && window.echarts) {
+                    const isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+                    const chart = echarts.init(chartEl, isDark ? 'dark' : null);
+                    chart.setOption({
+                        backgroundColor: 'transparent',
+                        tooltip: {
+                            trigger: 'item',
+                            formatter: '{b}: {c} ({d}%)'
+                        },
+                        legend: {
+                            orient: 'horizontal',
+                            bottom: 0
+                        },
+                        series: [{
+                            name: '问题分诊',
+                            type: 'pie',
+                            radius: ['48%', '72%'],
+                            center: ['50%', '44%'],
+                            avoidLabelOverlap: true,
+                            label: {
+                                formatter: '{b}\n{d}%'
+                            },
+                            data: triageItems.map(item => ({
+                                name: item.label,
+                                value: item.value,
+                                itemStyle: { color: item.color }
+                            }))
+                        }]
+                    });
+                    window.addEventListener('resize', () => chart.resize());
+                }
+            } catch (e) {
+                console.error(e);
+                document.getElementById('stats-content').innerHTML = `<div class="error">加载统计数据失败：${escapeHtml(e.message)}</div>`;
+            }
+        }
+
+        router();
+    </script>
+</body>
+
+</html>
+

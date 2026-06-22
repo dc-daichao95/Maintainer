@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-MWD10CMTCP"></script>
+    <script type="module" src="js/app.js?v=20260607_1"></script>
+    <script>
+        window.dataLayer = window.dataLayer || [];
+        function gtag(){dataLayer.push(arguments);}
+        gtag('js', new Date());
+
+        gtag('config', 'G-MWD10CMTCP');
+    </script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/x-icon" href="static/favicon.ico">
+    <title>Sashiko</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        indigo: {
+                            50: "#eef2ff",
+                            600: "#4f46e5",
+                            800: "#3730a3",
+                            900: "#312e81"
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+</head>
+
+<body>
+    <div class="flex h-screen bg-gray-50 text-gray-900 overflow-hidden font-sans">
+        <!-- Sidebar -->
+        <aside class="w-64 bg-white border-r border-gray-200 text-gray-700 flex flex-col flex-shrink-0">
+            <div class="p-4 flex items-center gap-3 border-b border-gray-200">
+                <img src="logo.png" class="h-6 w-6" alt="Logo">
+                <span class="font-bold text-lg text-indigo-700">Kernel Maintainer</span>
+            </div>
+            <nav class="flex-1 overflow-y-auto py-4">
+                <ul class="space-y-1">
+                    <li>
+                        <a href="#/" class="flex items-center px-4 py-2 hover:bg-indigo-50 hover:text-indigo-700 nav-link group">
+                            <svg class="w-5 h-5 mr-3 nav-icon text-gray-400 group-hover:text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"></path></svg>
+                            概览
+                        </a>
+                    </li>
+                    <li>
+                        <a href="#/stats" class="flex items-center px-4 py-2 hover:bg-indigo-50 hover:text-indigo-700 nav-link group">
+                            <svg class="w-5 h-5 mr-3 nav-icon text-gray-400 group-hover:text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>
+                            问题处理统计
+                        </a>
+                    </li>
+                    <li>
+                        <a href="#/issues" class="flex items-center px-4 py-2 hover:bg-indigo-50 hover:text-indigo-700 nav-link group">
+                            <svg class="w-5 h-5 mr-3 nav-icon text-gray-400 group-hover:text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path></svg>
+                            问题列表
+                        </a>
+                    </li>
+                    <li>
+                        <a href="#/server-config" class="flex items-center px-4 py-2 hover:bg-indigo-50 hover:text-indigo-700 nav-link group">
+                            <svg class="w-5 h-5 mr-3 nav-icon text-gray-400 group-hover:text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"></path></svg>
+                            服务器配置
+                        </a>
+                    </li>
+                    <li>
+                        <a href="#/settings" class="flex items-center px-4 py-2 hover:bg-indigo-50 hover:text-indigo-700 nav-link group">
+                            <svg class="w-5 h-5 mr-3 nav-icon text-gray-400 group-hover:text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                            设置
+                        </a>
+                    </li>
+                </ul>
+            </nav>
+        </aside>
+
+        <!-- Main Content -->
+        <div class="flex-1 flex flex-col min-w-0">
+            <!-- Header -->
+            <header class="bg-white border-b border-gray-200 p-4 flex items-center shadow-sm h-14">
+                <h2 class="text-xl font-semibold text-gray-800" id="pageTitle">Overview</h2>
+            </header>
+            
+            <!-- App Container -->
+            <main id="app" class="flex-1 overflow-auto p-6 bg-gray-50">
+            </main>
+        </div>
+    </div>
+    
+    <!-- Old modal -->
+    <div id="aboutModal" class="hidden fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center">
+        <div class="bg-white p-8 rounded-lg max-w-2xl w-full max-h-[90vh] overflow-y-auto relative">
+            <button onclick="closeAbout()" class="absolute top-4 right-4 text-gray-500 hover:text-gray-700 text-2xl">&times;</button>
+            <h2 class="text-2xl font-bold mb-4">About Sashiko</h2>
+            <p>Monolithic refactoring placeholder.</p>
+        </div>
+    </div>
+</body>
+
+</html>

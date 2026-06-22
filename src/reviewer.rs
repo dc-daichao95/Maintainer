@@ -1,0 +1,3558 @@
+// Copyright 2026 The Sashiko Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use crate::ReviewStatus;
+use crate::ai::quota::QuotaManager;
+use crate::ai::{
+    AiErrorClass, AiProvider, AiRequest, RemoteAiErrorPayload, classify_ai_error,
+    create_provider_cached,
+};
+use crate::baseline::{BaselineRegistry, BaselineResolution, extract_files_from_diff};
+use crate::db::{AiInteractionParams, Database, Finding, PatchsetRow, Severity, ToolUsage};
+use crate::email_policy::EmailPolicyConfig;
+use crate::email_router::{Action as EmailAction, EmailRouter};
+use crate::git_ops::{GitWorktree, ensure_remote, get_commit_hash};
+use crate::settings::{ScheduleSettings, Settings};
+use crate::utils::redact_secret;
+use crate::worker::prompts::ReviewError;
+use anyhow::Result;
+use chrono::Timelike;
+use serde::Serialize;
+use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Command;
+use tokio::sync::Semaphore;
+use tracing::{error, info, warn};
+
+#[derive(Clone)]
+struct ReviewContext {
+    semaphore: Arc<Semaphore>,
+    db: Arc<Database>,
+    settings: Settings,
+    baseline_registry: Arc<BaselineRegistry>,
+    quota_manager: Arc<QuotaManager>,
+    target_review_count: usize,
+    provider: Arc<dyn AiProvider>,
+}
+
+enum PatchResult {
+    Success,
+    ReviewFailed,
+    PausedBySchedule,
+}
+
+#[derive(Serialize)]
+struct BaselineAttempt {
+    baseline: String,
+    status: String,
+    log: String,
+}
+
+fn generate_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let start = SystemTime::now();
+    let since_the_epoch = start
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards");
+    format!("{:x}-{:x}", since_the_epoch.as_micros(), std::process::id())
+}
+
+fn is_hour_in_schedule(schedule: &ScheduleSettings, current_hour: u8) -> bool {
+    if schedule.start_hour <= schedule.end_hour {
+        current_hour >= schedule.start_hour && current_hour < schedule.end_hour
+    } else {
+        current_hour >= schedule.start_hour || current_hour < schedule.end_hour
+    }
+}
+
+const REVIEW_PAUSED_BY_SCHEDULE: &str = "Review paused: outside scheduled review window";
+
+fn get_current_hour(schedule: &ScheduleSettings) -> u8 {
+    if let Some(tz_name) = &schedule.timezone {
+        if let Ok(tz) = tz_name.parse::<chrono_tz::Tz>() {
+            return chrono::Utc::now().with_timezone(&tz).hour() as u8;
+        }
+    }
+    chrono::Local::now().hour() as u8
+}
+
+fn should_process_reviews_now(settings: &Settings) -> bool {
+    if let Some(schedule) = &settings.review.schedule {
+        let current_hour = get_current_hour(schedule);
+        is_hour_in_schedule(schedule, current_hour)
+    } else {
+        true
+    }
+}
+
+/// The `Reviewer` service orchestrates the review process for patchsets.
+///
+/// It manages:
+/// - Baseline resolution and worktree preparation.
+/// - AI-based code review execution.
+/// - Patch application verification.
+/// - Interaction with the database and external tools.
+pub struct Reviewer {
+    db: Arc<Database>,
+    settings: Settings,
+    semaphore: Arc<Semaphore>,
+    baseline_registry: Arc<BaselineRegistry>,
+    quota_manager: Arc<QuotaManager>,
+    provider: Arc<dyn AiProvider>,
+}
+
+impl Reviewer {
+    /// Creates a new `Reviewer` instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `db` - The database connection.
+    /// * `settings` - Application settings.
+    pub async fn new(db: Arc<Database>, settings: Settings) -> Self {
+        let concurrency = settings.review.concurrency;
+        let repo_path = PathBuf::from(&settings.git.repository_path);
+
+        let baseline_registry =
+            match BaselineRegistry::new(&repo_path, settings.git.custom_remotes.clone()) {
+                Ok(r) => Arc::new(r),
+                Err(e) => {
+                    error!(
+                        "Failed to initialize BaselineRegistry: {}. Using empty registry.",
+                        e
+                    );
+                    Arc::new(
+                        BaselineRegistry::new(&repo_path, settings.git.custom_remotes.clone())
+                            .unwrap_or_else(|_| {
+                                panic!("Critical error initializing BaselineRegistry: {}", e)
+                            }),
+                    )
+                }
+            };
+
+        let provider = create_provider_cached(
+            &settings,
+            settings.ai.response_cache,
+            settings.ai.response_cache_ttl_days,
+        )
+        .await
+        .expect("Failed to create AI provider");
+
+        Self {
+            db,
+            settings,
+            semaphore: Arc::new(Semaphore::new(concurrency)),
+            baseline_registry,
+            quota_manager: Arc::new(QuotaManager::new()),
+            provider,
+        }
+    }
+
+    /// Starts the reviewer service loop.
+    ///
+    /// This method runs indefinitely, polling the database for pending patchsets
+    /// and processing them. It handles concurrency limits and worktree cleanup.
+    pub async fn start(&self) {
+        info!(
+            "Starting Reviewer service with concurrency limit: {}",
+            self.settings.review.concurrency
+        );
+
+        if self.settings.ai.no_ai {
+            info!(
+                "AI interactions disabled via settings. Reviewer service will skip AI analysis but verify patch application."
+            );
+        }
+
+        if let Some(schedule) = &self.settings.review.schedule {
+            if let Err(e) = schedule.validate() {
+                error!(
+                    "Invalid schedule configuration: {}. Schedule will be ignored.",
+                    e
+                );
+            }
+            if schedule.start_hour == schedule.end_hour {
+                warn!(
+                    "Schedule start_hour equals end_hour ({}): reviews will NEVER run!",
+                    schedule.start_hour
+                );
+            }
+            let tz_display = schedule.timezone.as_deref().unwrap_or("local");
+            info!(
+                "Night review schedule enabled: reviews only run between {:02}:00 and {:02}:00 ({} time)",
+                schedule.start_hour, schedule.end_hour, tz_display
+            );
+        }
+
+        // Ensure Context Cache
+        let worktree_dir = PathBuf::from(&self.settings.review.worktree_dir);
+        if worktree_dir.exists() {
+            info!(
+                "Cleaning up previous worktree directory: {:?}",
+                worktree_dir
+            );
+            if let Err(e) = std::fs::remove_dir_all(&worktree_dir) {
+                error!("Failed to cleanup worktree directory: {}", e);
+            }
+        }
+        if let Err(e) = std::fs::create_dir_all(&worktree_dir) {
+            error!("Failed to create worktree directory: {}", e);
+        }
+
+        match self.db.reset_reviewing_status().await {
+            Ok(count) => {
+                if count > 0 {
+                    info!("Recovered {} interrupted reviews (reset to Pending)", count);
+                }
+            }
+            Err(e) => error!("Failed to reset reviewing status: {}", e),
+        }
+
+        loop {
+            match self.process_pending_patchsets().await {
+                Ok(_) => {}
+                Err(e) => error!("Error in reviewer loop: {}", e),
+            }
+
+            if let Err(e) = self.release_embargoed_results().await {
+                error!("Error releasing embargoed results: {}", e);
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+        }
+    }
+
+    async fn process_pending_patchsets(&self) -> Result<()> {
+        if !should_process_reviews_now(&self.settings) {
+            return Ok(());
+        }
+
+        let patchsets = self.db.get_pending_patchsets(10).await?;
+
+        if patchsets.is_empty() {
+            return Ok(());
+        }
+
+        info!("Found {} pending patchsets for review", patchsets.len());
+
+        for patchset in patchsets {
+            let permit = self.semaphore.clone().acquire_owned().await?;
+            let target_review_count = patchset.target_review_count.unwrap_or(1) as usize;
+
+            let context = ReviewContext {
+                semaphore: self.semaphore.clone(),
+                db: self.db.clone(),
+                settings: self.settings.clone(),
+                baseline_registry: self.baseline_registry.clone(),
+                quota_manager: self.quota_manager.clone(),
+                target_review_count,
+                provider: self.provider.clone(),
+            };
+
+            tokio::spawn(async move {
+                let _permit = permit;
+                Self::review_patchset_task(context, patchset).await;
+            });
+        }
+
+        Ok(())
+    }
+
+    async fn release_embargoed_results(&self) -> Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let patchsets = self.db.get_expired_embargoed_patchsets(now, 10).await?;
+
+        if patchsets.is_empty() {
+            return Ok(());
+        }
+
+        info!(
+            "Found {} expired embargoed patchsets to release",
+            patchsets.len()
+        );
+
+        for patchset in patchsets {
+            let patchset_id = patchset.id;
+            info!("Releasing embargo for patchset {}", patchset_id);
+
+            let reviews = self
+                .db
+                .get_completed_reviews_for_release(patchset_id)
+                .await?;
+
+            let context = ReviewContext {
+                semaphore: self.semaphore.clone(),
+                db: self.db.clone(),
+                settings: self.settings.clone(),
+                baseline_registry: self.baseline_registry.clone(),
+                quota_manager: self.quota_manager.clone(),
+                target_review_count: 1,
+                provider: self.provider.clone(),
+            };
+
+            let mut all_success = true;
+            for review in reviews {
+                let ps_msg_id = patchset
+                    .message_id
+                    .as_deref()
+                    .unwrap_or(&review.patch_message_id);
+
+                if let Err(e) = Self::queue_notifications(
+                    &context,
+                    review.patch_id,
+                    &review.patch_message_id,
+                    ps_msg_id,
+                    review.index,
+                    &review.inline_review,
+                    Some(&review.findings),
+                    &review.summary,
+                )
+                .await
+                {
+                    error!(
+                        "Failed to queue notification for patch {}: {}",
+                        review.patch_id, e
+                    );
+                    all_success = false;
+                }
+            }
+
+            if all_success {
+                info!("Embargo released successfully for patchset {}", patchset_id);
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn review_patchset_task(ctx: ReviewContext, patchset: PatchsetRow) {
+        let patchset_id = patchset.id;
+        info!("Starting review for patchset {}", patchset_id);
+
+        if let Err(e) = ctx
+            .db
+            .update_patchset_status(patchset_id, ReviewStatus::InReview.as_str())
+            .await
+        {
+            error!(
+                "Failed to update status to In Review for {}: {}",
+                patchset_id, e
+            );
+            return;
+        }
+
+        let diffs = match ctx.db.get_patch_diffs(patchset_id).await {
+            Ok(d) => d,
+            Err(e) => {
+                error!("Failed to fetch diffs for {}: {}", patchset_id, e);
+                let _ = ctx.db.update_patchset_status(patchset_id, "Failed").await;
+                return;
+            }
+        };
+
+        // patches_json for input payload (contains all patches)
+        let patches_json: Vec<_> = diffs
+            .iter()
+            .map(|(_id, idx, diff, subj, auth, date, msg_id)| {
+                let is_sha = msg_id.len() == 40 && msg_id.chars().all(|c| c.is_ascii_hexdigit());
+                json!({
+                    "index": idx,
+                    "diff": diff,
+                    "subject": subj,
+                    "author": auth,
+                    "date": date,
+                    "message_id": msg_id,
+                    "commit_id": if is_sha { Some(msg_id) } else { None }
+                })
+            })
+            .collect();
+
+        // Determine Baseline Candidates and check patchset size limits
+        let mut all_files = Vec::new();
+
+        for p in patches_json.iter() {
+            if let Some(diff_str) = p["diff"].as_str() {
+                let files = extract_files_from_diff(diff_str);
+                all_files.extend(files);
+            }
+        }
+
+        all_files.sort();
+        all_files.dedup();
+
+        let body = if let Some(mid) = &patchset.message_id {
+            ctx.db.get_message_body(mid).await.unwrap_or(None)
+        } else if let Some(first_patch_msg_id) =
+            patches_json.first().and_then(|p| p["message_id"].as_str())
+        {
+            ctx.db
+                .get_message_body(first_patch_msg_id)
+                .await
+                .unwrap_or(None)
+        } else {
+            None
+        };
+
+        let subject = patchset.subject.clone().unwrap_or("Unknown".to_string());
+        let candidates = if let Some(bid) = patchset.baseline_id {
+            if let Ok(Some(baseline)) = ctx.db.get_baseline(bid).await {
+                if let Some(commit) = baseline.last_known_commit {
+                    info!(
+                        "Using forced baseline commit {} from ingestion for patchset {}",
+                        commit, patchset_id
+                    );
+                    if let Some(repo_url) = baseline.repo_url {
+                        vec![BaselineResolution::CommitInRepo { repo_url, commit }]
+                    } else {
+                        vec![BaselineResolution::Commit(commit)]
+                    }
+                } else {
+                    ctx.baseline_registry
+                        .resolve_candidates(&all_files, &subject, body.as_deref())
+                        .await
+                }
+            } else {
+                ctx.baseline_registry
+                    .resolve_candidates(&all_files, &subject, body.as_deref())
+                    .await
+            }
+        } else {
+            ctx.baseline_registry
+                .resolve_candidates(&all_files, &subject, body.as_deref())
+                .await
+        };
+
+        // 1. Find a working baseline (apply series)
+        let (found_baseline, patch_commits, logs) =
+            Self::prepare_baseline_worktree(&ctx, patchset_id, &candidates, &diffs).await;
+
+        let prompts_hash = get_commit_hash(Path::new("."), "HEAD").await.ok();
+
+        // Save findings to patchset
+        if let Some((resolution, baseline_id, worktree)) = found_baseline {
+            let _ = ctx
+                .db
+                .update_patchset_baseline_info(
+                    patchset_id,
+                    Some(baseline_id),
+                    Some(ctx.settings.ai.model.as_str()),
+                    prompts_hash.as_deref(),
+                    Some(logs.as_str()),
+                    Some(ctx.settings.ai.provider.as_str()),
+                )
+                .await;
+
+            // patches_json for input payload (contains all patches)
+            let patches_json: Vec<_> = diffs
+                .iter()
+                .map(|(_id, idx, diff, subj, auth, date, msg_id)| {
+                    let resolved_sha = patch_commits.get(idx);
+                    let is_msg_sha =
+                        msg_id.len() == 40 && msg_id.chars().all(|c| c.is_ascii_hexdigit());
+
+                    let commit_id = if let Some(sha) = resolved_sha {
+                        Some(sha.as_str())
+                    } else if is_msg_sha {
+                        Some(msg_id.as_str())
+                    } else {
+                        None
+                    };
+
+                    json!({
+                        "index": idx,
+                        "diff": diff,
+                        "subject": subj,
+                        "author": auth,
+                        "date": date,
+                        "message_id": msg_id,
+                        "commit_id": commit_id
+                    })
+                })
+                .collect();
+
+            let patchset_msg_id = patchset
+                .message_id
+                .clone()
+                .or_else(|| {
+                    patches_json
+                        .first()
+                        .and_then(|p| p["message_id"].as_str().map(|s| s.to_string()))
+                })
+                .unwrap_or_default();
+
+            let input_payload = json!({
+                "id": patchset_id,
+                "message_id": patchset_msg_id,
+                "subject": patchset.subject.clone().unwrap_or("Unknown".to_string()),
+                "patches": patches_json
+            });
+
+            let skip_filters: Vec<String> = patchset
+                .skip_filters
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default();
+            let only_filters: Vec<String> = patchset
+                .only_filters
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default();
+
+            let compile_glob = |pattern: &str| -> regex::Regex {
+                let mut re = String::from("^");
+                for c in pattern.chars() {
+                    match c {
+                        '*' => re.push_str(".*"),
+                        '?' => re.push('.'),
+                        '.' | '+' | '(' | ')' | '|' | '^' | '$' | '[' | ']' | '{' | '}' | '\\' => {
+                            re.push('\\');
+                            re.push(c);
+                        }
+                        _ => re.push(c),
+                    }
+                }
+                re.push('$');
+                regex::Regex::new(&re).unwrap_or_else(|_| regex::Regex::new("a^").unwrap())
+            };
+
+            let skip_regexes: Vec<_> = skip_filters.iter().map(|f| compile_glob(f)).collect();
+            let only_regexes: Vec<_> = only_filters.iter().map(|f| compile_glob(f)).collect();
+
+            struct ValidJob {
+                patch_id: i64,
+                index: i64,
+                commit_sha: Option<String>,
+                diff: String,
+            }
+
+            // 2. Run Reviews
+            let mut review_success = true; // Optimistic
+            let mut failed_patches = 0;
+
+            let mut valid_jobs = Vec::new();
+
+            for (patch_id, index, diff, _subj, _auth, _date, _msg_id) in &diffs {
+                let mut should_skip = false;
+
+                // Opt-out logic
+                if skip_regexes.iter().any(|re| re.is_match(_subj)) {
+                    info!("Skipping patch {} (subject matches skip filter)", patch_id);
+                    should_skip = true;
+                }
+
+                // Opt-in logic (if only_filters is not empty, subject MUST match at least one)
+                if !should_skip
+                    && !only_regexes.is_empty()
+                    && !only_regexes.iter().any(|re| re.is_match(_subj))
+                {
+                    info!(
+                        "Skipping patch {} (subject does not match any only filter)",
+                        patch_id
+                    );
+                    should_skip = true;
+                }
+
+                if !should_skip {
+                    let mut unique_patch_files = extract_files_from_diff(diff);
+                    unique_patch_files.sort();
+                    unique_patch_files.dedup();
+                    let patch_files_count = unique_patch_files.len();
+
+                    let patch_lines_changed = diff
+                        .lines()
+                        .filter(|line| {
+                            (line.starts_with('+') && !line.starts_with("+++"))
+                                || (line.starts_with('-') && !line.starts_with("---"))
+                        })
+                        .count();
+
+                    if patch_lines_changed > ctx.settings.review.max_lines_changed
+                        || patch_files_count > ctx.settings.review.max_files_touched
+                    {
+                        info!(
+                            "Skipping patch {} (exceeds size limits: {} lines, {} files)",
+                            patch_id, patch_lines_changed, patch_files_count
+                        );
+                        should_skip = true;
+                    }
+                }
+
+                if should_skip {
+                    let _ = ctx.db.update_patch_status(*patch_id, "Skipped").await;
+                    continue;
+                }
+                let commit_sha = patch_commits.get(index).cloned();
+
+                valid_jobs.push(ValidJob {
+                    patch_id: *patch_id,
+                    index: *index,
+                    commit_sha,
+                    diff: diff.to_string(),
+                });
+            }
+
+            // Reverse so that pop() processes in the original order (index 1 first)
+            valid_jobs.reverse();
+            let total_valid = valid_jobs.len();
+            let valid_jobs_queue = Arc::new(tokio::sync::Mutex::new(valid_jobs));
+            let mut handles = Vec::new();
+            let baseline_ref_str = resolution.as_str();
+            let schedule_paused = Arc::new(AtomicBool::new(false));
+
+            // If diffs length is >= 10, try concurrent processing using extra permits
+            if diffs.len() >= 10 && total_valid > 1 {
+                while let Ok(permit) = ctx.semaphore.clone().try_acquire_owned() {
+                    let queue = valid_jobs_queue.clone();
+                    let ctx_clone = ctx.clone();
+                    let input_payload_clone = input_payload.clone();
+                    let prompts_hash_clone = prompts_hash.clone().map(|s| s.to_string());
+                    let baseline_ref_clone = baseline_ref_str.to_string();
+                    let baseline_id_clone = baseline_id;
+                    let embargo_until_clone = patchset.embargo_until;
+                    let schedule_paused_clone = schedule_paused.clone();
+
+                    let handle = tokio::spawn(async move {
+                        let mut failed = 0;
+                        loop {
+                            if schedule_paused_clone.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            let job = {
+                                let mut q = queue.lock().await;
+                                q.pop()
+                            };
+                            if let Some(job) = job {
+                                match Self::process_patch_review(
+                                    &ctx_clone,
+                                    patchset_id,
+                                    job.patch_id,
+                                    job.index,
+                                    &baseline_ref_clone,
+                                    Some(baseline_id_clone),
+                                    &input_payload_clone,
+                                    job.commit_sha,
+                                    prompts_hash_clone.as_deref(),
+                                    None, // Worker creates its OWN worktree!
+                                    &job.diff,
+                                    embargo_until_clone,
+                                )
+                                .await
+                                {
+                                    Ok(PatchResult::Success) => {}
+                                    Ok(PatchResult::PausedBySchedule) => {
+                                        schedule_paused_clone.store(true, Ordering::Relaxed);
+                                        break;
+                                    }
+                                    _ => failed += 1,
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                        drop(permit);
+                        failed
+                    });
+                    handles.push(handle);
+
+                    // Don't spawn more workers than remaining jobs
+                    let remaining = {
+                        let q = valid_jobs_queue.lock().await;
+                        q.len()
+                    };
+                    if remaining <= handles.len() {
+                        break;
+                    }
+                }
+            }
+
+            // Main worker loop uses the existing worktree
+            let mut main_failed = 0;
+            loop {
+                if schedule_paused.load(Ordering::Relaxed) {
+                    break;
+                }
+                let job = {
+                    let mut q = valid_jobs_queue.lock().await;
+                    q.pop()
+                };
+                if let Some(job) = job {
+                    match Self::process_patch_review(
+                        &ctx,
+                        patchset_id,
+                        job.patch_id,
+                        job.index,
+                        &baseline_ref_str,
+                        Some(baseline_id),
+                        &input_payload,
+                        job.commit_sha,
+                        prompts_hash.as_deref(),
+                        Some(&worktree.path),
+                        &job.diff,
+                        patchset.embargo_until,
+                    )
+                    .await
+                    {
+                        Ok(PatchResult::Success) => {}
+                        Ok(PatchResult::PausedBySchedule) => {
+                            schedule_paused.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                        _ => main_failed += 1,
+                    }
+                } else {
+                    break;
+                }
+            }
+            failed_patches += main_failed;
+
+            for handle in handles {
+                if let Ok(failed) = handle.await {
+                    failed_patches += failed;
+                }
+            }
+
+            if failed_patches > 0 {
+                review_success = false;
+            }
+
+            // Cleanup worktree here since we kept it alive for reuse
+            let _ = worktree.remove().await;
+
+            if schedule_paused.load(Ordering::Relaxed) {
+                info!(
+                    "Review window closed while processing patchset {}. Returning to Pending.",
+                    patchset_id
+                );
+                let _ = ctx
+                    .db
+                    .update_patchset_status(patchset_id, ReviewStatus::Pending.as_str())
+                    .await;
+                return;
+            }
+
+            let current_status = ctx.db.get_patchset_status(patchset_id).await.ok().flatten();
+            if current_status.as_deref() == Some(ReviewStatus::Cancelled.as_str()) {
+                info!(
+                    "Patchset {} was cancelled during review, preserving status",
+                    patchset_id
+                );
+            } else {
+                let final_status = if review_success {
+                    ReviewStatus::Reviewed.as_str().to_string()
+                } else {
+                    ReviewStatus::Failed.as_str().to_string()
+                };
+
+                let _ = ctx
+                    .db
+                    .update_patchset_status(patchset_id, &final_status)
+                    .await;
+            }
+        } else {
+            // No baseline found
+            warn!("No working baseline found for patchset {}", patchset_id);
+            let _ = ctx
+                .db
+                .update_patchset_baseline_info(
+                    patchset_id,
+                    None,
+                    Some(ctx.settings.ai.model.as_str()),
+                    prompts_hash.as_deref(),
+                    Some(logs.as_str()),
+                    Some(ctx.settings.ai.provider.as_str()),
+                )
+                .await;
+
+            let _ = ctx
+                .db
+                .update_patchset_status(patchset_id, ReviewStatus::FailedToApply.as_str())
+                .await;
+        }
+
+        if let Some(stats) = ctx.provider.cache_stats() {
+            use crate::ai::cache::fmt_thousands;
+            let total_hits = stats.hits_this_session + stats.hits_prev_session;
+            let total_tokens = stats.tokens_saved_this_session + stats.tokens_saved_prev_session;
+            if total_hits > 0 {
+                info!(
+                    "Patchset {} cache summary — {} hits ({} this session, {} previous), {} tokens saved ({} this session, {} previous)",
+                    patchset_id,
+                    fmt_thousands(total_hits),
+                    fmt_thousands(stats.hits_this_session),
+                    fmt_thousands(stats.hits_prev_session),
+                    fmt_thousands(total_tokens),
+                    fmt_thousands(stats.tokens_saved_this_session),
+                    fmt_thousands(stats.tokens_saved_prev_session),
+                );
+            }
+        }
+    }
+
+    async fn prepare_baseline_worktree(
+        ctx: &ReviewContext,
+        patchset_id: i64,
+        candidates: &[BaselineResolution],
+        diffs: &[(i64, i64, String, String, String, i64, String)],
+    ) -> (
+        Option<(BaselineResolution, i64, GitWorktree)>,
+        HashMap<i64, String>,
+        String,
+    ) {
+        let mut attempts: Vec<BaselineAttempt> = Vec::new();
+        let mut tested_shas = std::collections::HashSet::new();
+
+        for candidate in candidates {
+            let baseline_ref = candidate.as_str();
+            let mut current_log = format!("Trying baseline: {}\n", baseline_ref);
+            let mut current_status = "Failed".to_string();
+            let repo_path = Self::repo_path_for_candidate(ctx, candidate);
+
+            // Check remote
+            if let BaselineResolution::RemoteTarget { url, name, .. } = candidate
+                && let Err(e) = ensure_remote(&repo_path, name, url, false).await
+            {
+                let msg = format!("Failed to fetch remote {}: {}\n", redact_secret(url), e);
+                current_log.push_str(&msg);
+                error!("{}", msg.trim());
+                attempts.push(BaselineAttempt {
+                    baseline: baseline_ref.clone(),
+                    status: current_status,
+                    log: current_log,
+                });
+                continue;
+            }
+
+            // Resolve SHA
+            let baseline_sha = match get_commit_hash(&repo_path, &baseline_ref).await {
+                Ok(sha) => sha,
+                Err(e) => {
+                    if let BaselineResolution::Commit(sha_str) = candidate {
+                        // Attempt to fetch the missing commit from origin
+                        let _ = Command::new("git")
+                            .current_dir(&repo_path)
+                            .args(["fetch", "origin", sha_str])
+                            .output()
+                            .await;
+                        // Retry resolving
+                        match get_commit_hash(&repo_path, &baseline_ref).await {
+                            Ok(sha) => sha,
+                            Err(e2) => {
+                                let msg = format!(
+                                    "Failed to resolve baseline ref {}: {}\n",
+                                    baseline_ref, e2
+                                );
+                                current_log.push_str(&msg);
+                                attempts.push(BaselineAttempt {
+                                    baseline: baseline_ref.clone(),
+                                    status: current_status,
+                                    log: current_log,
+                                });
+                                continue;
+                            }
+                        }
+                    } else {
+                        let msg =
+                            format!("Failed to resolve baseline ref {}: {}\n", baseline_ref, e);
+                        current_log.push_str(&msg);
+                        attempts.push(BaselineAttempt {
+                            baseline: baseline_ref.clone(),
+                            status: current_status,
+                            log: current_log,
+                        });
+                        continue;
+                    }
+                }
+            };
+
+            if !tested_shas.insert(baseline_sha.clone()) {
+                info!("Skipping duplicate baseline SHA {}", baseline_sha);
+                continue;
+            }
+
+            let baseline_display = format!("{} ({})", baseline_ref, baseline_sha);
+            current_log = format!("Trying baseline: {}\n", baseline_display);
+
+            // Worktree
+            let worktree = match GitWorktree::new(
+                &repo_path,
+                &baseline_sha,
+                Some(Path::new(&ctx.settings.review.worktree_dir)),
+            )
+            .await
+            {
+                Ok(wt) => wt,
+                Err(e) => {
+                    let msg = format!("Failed to create worktree: {}\n", e);
+                    current_log.push_str(&msg);
+                    attempts.push(BaselineAttempt {
+                        baseline: baseline_ref.clone(),
+                        status: current_status,
+                        log: current_log,
+                    });
+                    continue;
+                }
+            };
+
+            // Apply patches
+            let mut patch_commits = HashMap::new();
+            let mut application_failed = false;
+            let mut apply_logs = String::new();
+
+            for (i, (patch_id, index, diff, subject, author, date_ts, msg_id)) in
+                diffs.iter().enumerate()
+            {
+                let date_str = std::process::Command::new("date")
+                    .arg("-R")
+                    .arg("-d")
+                    .arg(format!("@{}", date_ts))
+                    .output()
+                    .ok()
+                    .and_then(|o| {
+                        if o.status.success() {
+                            Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
+
+                let mut applied = false;
+                let mut fast_path_taken = false;
+
+                // Optimization: If message_id is a valid SHA, just checkout it
+                if msg_id.len() == 40 && msg_id.chars().all(|c| c.is_ascii_hexdigit()) {
+                    let next_is_sha = diffs
+                        .get(i + 1)
+                        .map(|(_, _, _, _, _, _, next_msg)| {
+                            next_msg.len() == 40 && next_msg.chars().all(|c| c.is_ascii_hexdigit())
+                        })
+                        .unwrap_or(true); // If there is no next item, we treat it as "safe to skip reset" (we are done)
+
+                    if next_is_sha {
+                        // Fast path: verify existence only, skip checkout
+                        match get_commit_hash(&worktree.path, msg_id).await {
+                            Ok(_) => {
+                                applied = true;
+                                fast_path_taken = true;
+                            }
+                            Err(e) => {
+                                let msg = format!("Commit {} missing: {}\n", msg_id, e);
+                                info!("{}", msg);
+                                apply_logs.push_str(&msg);
+                            }
+                        }
+                    } else {
+                        match worktree.reset_hard(msg_id).await {
+                            Ok(_) => applied = true,
+                            Err(e) => {
+                                let msg = format!("Failed to reset hard to {}: {}\n", msg_id, e);
+                                info!("{}", msg);
+                                apply_logs.push_str(&msg);
+                            }
+                        }
+                    }
+                }
+
+                if !applied {
+                    let mbox = format!(
+                        "From: {}\nDate: {}\nSubject: {}\n\n{}\n",
+                        author, date_str, subject, diff
+                    );
+
+                    // Try git am
+                    if (worktree.apply_patch(&mbox).await).is_ok() {
+                        applied = true;
+                    } else {
+                        // Fallback raw diff
+                        if let Ok(output) = worktree.apply_raw_diff(diff).await
+                            && output.status.success()
+                        {
+                            applied = true;
+                            // Commit raw diff
+                            let _ = Command::new("git")
+                                .current_dir(&worktree.path)
+                                .args(["add", "."])
+                                .output()
+                                .await;
+                            let commit_msg = format!("{}\n\n(Applied via git apply)", subject);
+                            let _ = Command::new("git")
+                                .current_dir(&worktree.path)
+                                .env("GIT_AUTHOR_NAME", author)
+                                .env("GIT_AUTHOR_EMAIL", "sashiko@localhost")
+                                .args(["commit", "-m", &commit_msg])
+                                .output()
+                                .await;
+                        }
+                    }
+                }
+
+                if applied {
+                    if fast_path_taken {
+                        patch_commits.insert(*index, msg_id.clone());
+                    } else if let Ok(sha) = get_commit_hash(&worktree.path, "HEAD").await {
+                        patch_commits.insert(*index, sha);
+                    }
+                } else {
+                    let msg = format!(
+                        "Patch {}/{} (ID: {}) failed to apply.\n",
+                        patchset_id, index, patch_id
+                    );
+                    apply_logs.push_str(&msg);
+                    application_failed = true;
+                    break;
+                }
+            }
+
+            if !application_failed {
+                current_log.push_str("Application successful.\n");
+                current_status = "Applied".to_string();
+
+                attempts.push(BaselineAttempt {
+                    baseline: baseline_display.clone(),
+                    status: current_status,
+                    log: current_log,
+                });
+
+                // Create baseline in DB
+                let baseline_id = {
+                    let (repo_url, branch) = match candidate {
+                        BaselineResolution::RemoteTarget { url, .. } => {
+                            (Some(url.as_str()), Some(baseline_ref.as_str()))
+                        }
+                        BaselineResolution::CommitInRepo { repo_url, .. } => {
+                            (Some(repo_url.as_str()), Some(baseline_ref.as_str()))
+                        }
+                        _ => (None, Some(baseline_ref.as_str())),
+                    };
+                    ctx.db
+                        .create_baseline(repo_url, branch, Some(&baseline_sha))
+                        .await
+                        .ok() // If fail, we just proceed. Better to have it.
+                };
+
+                // Serialize attempts to JSON
+                let logs_json = serde_json::to_string(&attempts).unwrap_or_default();
+
+                if let Some(bid) = baseline_id {
+                    info!(
+                        "Baseline found for patchset {}: {} ({} attempts)",
+                        patchset_id,
+                        candidate.as_str(),
+                        attempts.len()
+                    );
+                    return (
+                        Some((candidate.clone(), bid, worktree)),
+                        patch_commits,
+                        logs_json,
+                    );
+                }
+                // Fallback if DB insert fails, though unlikely
+                // We still return success but maybe log error.
+                // We do not continue loop as application succeeded.
+                // Just return success without ID.
+                // This path is tricky. Let's assume ID creation works or we fail this attempt.
+                // If we fail, we clean up.
+                // For now, let's treat it as success but maybe missing ID is fatal for `Some` return.
+                // But `create_baseline` returns Result<i64>.
+                // If it fails, we can't associate baseline.
+                // Let's count it as failure.
+                // Re-push attempt with failure.
+                // Actually we already pushed "Applied".
+                // Let's modify the last attempt status if we can't save to DB.
+                if let Some(last) = attempts.last_mut() {
+                    last.status = "DB Error".to_string();
+                    last.log.push_str("Failed to record baseline in DB.\n");
+                }
+            } else {
+                current_log.push_str(&apply_logs);
+                current_log.push_str("Application failed.\n");
+                attempts.push(BaselineAttempt {
+                    baseline: baseline_display.clone(),
+                    status: current_status,
+                    log: current_log,
+                });
+            }
+
+            // Clean up failed worktree
+            let _ = worktree.remove().await;
+        }
+
+        let logs_json = serde_json::to_string(&attempts).unwrap_or_default();
+        (None, HashMap::new(), logs_json)
+    }
+
+    fn repo_path_for_candidate(ctx: &ReviewContext, candidate: &BaselineResolution) -> PathBuf {
+        if let BaselineResolution::CommitInRepo { repo_url, .. } = candidate {
+            let path = PathBuf::from(repo_url);
+            if path.exists() {
+                return path;
+            }
+        }
+
+        PathBuf::from(&ctx.settings.git.repository_path)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn process_patch_review(
+        ctx: &ReviewContext,
+        patchset_id: i64,
+        patch_id: i64,
+        index: i64,
+        baseline_ref: &str,
+        baseline_id: Option<i64>,
+        input_payload: &Value,
+        commit_sha: Option<String>,
+        prompts_hash: Option<&str>,
+        worktree_path: Option<&Path>,
+        diff: &str,
+        embargo_until: Option<i64>,
+    ) -> Result<PatchResult> {
+        info!(
+            "Reviewing patch {}/{} (ID: {})",
+            patchset_id, index, patch_id
+        );
+
+        let successful_count = ctx
+            .db
+            .count_successful_reviews(patchset_id, patch_id, baseline_id)
+            .await?;
+
+        if successful_count >= ctx.target_review_count {
+            info!(
+                "Patch {}/{} (ID: {}) already has {} successful reviews with baseline {:?} (target: {}). Skipping.",
+                patchset_id,
+                index,
+                patch_id,
+                successful_count,
+                baseline_id,
+                ctx.target_review_count
+            );
+            return Ok(PatchResult::Success);
+        }
+
+        if ctx
+            .db
+            .has_failed_review(patchset_id, patch_id, baseline_id)
+            .await?
+        {
+            info!(
+                "Patch {}/{} (ID: {}) already has a failed review. Skipping to keep it visible.",
+                patchset_id, index, patch_id
+            );
+            let _ = ctx.db.update_patch_status(patch_id, "Failed").await;
+            return Ok(PatchResult::ReviewFailed);
+        }
+
+        let files = extract_files_from_diff(diff);
+        if !files.is_empty()
+            && files.iter().all(|f| {
+                ctx.settings
+                    .review
+                    .ignore_files
+                    .iter()
+                    .any(|ignored| f.starts_with(ignored))
+            })
+        {
+            info!(
+                "Skipping review for patch {}/{} (ID: {}) as it touches only ignored files.",
+                patchset_id, index, patch_id
+            );
+
+            let review_id = if let Some(id) = ctx
+                .db
+                .get_pending_review_id(patchset_id, Some(patch_id))
+                .await?
+            {
+                id
+            } else {
+                ctx.db
+                    .create_review(
+                        patchset_id,
+                        Some(patch_id),
+                        &ctx.settings.ai.provider,
+                        &ctx.settings.ai.model,
+                        baseline_id,
+                        prompts_hash,
+                    )
+                    .await?
+            };
+
+            let _ = ctx
+                .db
+                .complete_review(
+                    review_id,
+                    ReviewStatus::Skipped.as_str(),
+                    "Skipped: touches only ignored files",
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+
+            return Ok(PatchResult::Success);
+        }
+
+        let mut retries = 0;
+        let max_retries = ctx.settings.review.max_retries;
+
+        let mut existing_pending_review_id = ctx
+            .db
+            .get_pending_review_id(patchset_id, Some(patch_id))
+            .await?;
+
+        loop {
+            if !should_process_reviews_now(&ctx.settings) {
+                info!(
+                    "Review window closed during patch {}/{} (ID: {}), pausing review",
+                    patchset_id, index, patch_id
+                );
+                return Ok(PatchResult::PausedBySchedule);
+            }
+
+            let review_id = if let Some(id) = existing_pending_review_id.take() {
+                id
+            } else {
+                ctx.db
+                    .create_review(
+                        patchset_id,
+                        Some(patch_id),
+                        &ctx.settings.ai.provider,
+                        &ctx.settings.ai.model,
+                        baseline_id,
+                        prompts_hash,
+                    )
+                    .await?
+            };
+
+            let _ = ctx
+                .db
+                .update_review_status(review_id, ReviewStatus::InReview.as_str(), None)
+                .await;
+
+            if !should_process_reviews_now(&ctx.settings) {
+                let _ = ctx
+                    .db
+                    .update_review_status(
+                        review_id,
+                        ReviewStatus::Pending.as_str(),
+                        Some(REVIEW_PAUSED_BY_SCHEDULE),
+                    )
+                    .await;
+                return Ok(PatchResult::PausedBySchedule);
+            }
+
+            let result = run_review_tool(
+                patchset_id,
+                input_payload,
+                &ctx.settings,
+                ctx.db.clone(),
+                baseline_ref,
+                Some(index),
+                commit_sha.clone(),
+                ctx.quota_manager.clone(),
+                review_id,
+                worktree_path,
+                ctx.provider.clone(),
+            )
+            .await;
+
+            match result {
+                Ok(json_output) => {
+                    let patches_status = json_output["patches"].as_array();
+                    let target_applied = patches_status
+                        .and_then(|arr| arr.iter().find(|p| p["index"] == index))
+                        .map(|p| p["status"] == "applied")
+                        .unwrap_or(false);
+
+                    let history = json_output.get("history");
+                    let logs_str = if let Some(h) = history {
+                        let mut scrubbed = h.clone();
+                        crate::ai::scrub_thought_signatures(&mut scrubbed);
+                        serde_json::to_string_pretty(&scrubbed).ok()
+                    } else {
+                        None
+                    };
+
+                    if let Some(h) = history.and_then(|h| h.as_array()) {
+                        // Tool usage recording (same as before)
+                        for item in h {
+                            if let Some(role) = item.get("role").and_then(|r| r.as_str())
+                                && role == "assistant"
+                                && let Some(calls) =
+                                    item.get("tool_calls").and_then(|c| c.as_array())
+                            {
+                                for call in calls {
+                                    let name = call["function_name"].as_str().unwrap_or("unknown");
+                                    let args = call["arguments"].to_string();
+                                    let _ = ctx
+                                        .db
+                                        .create_tool_usage(ToolUsage {
+                                            review_id,
+                                            provider: ctx.settings.ai.provider.clone(),
+                                            model: ctx.settings.ai.model.clone(),
+                                            tool_name: name.to_string(),
+                                            arguments: Some(args),
+                                            output_length: 0,
+                                        })
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+
+                    let interaction_id = if let Some(tokens_in) = json_output["tokens_in"].as_u64()
+                    {
+                        let i_id = generate_id();
+                        let input_ctx = json_output["input_context"].as_str().unwrap_or("");
+                        let output_raw = if let Some(r) = json_output.get("review") {
+                            r.to_string()
+                        } else if let Some(e) = json_output.get("error") {
+                            e.to_string()
+                        } else {
+                            String::new()
+                        };
+
+                        let _ = ctx
+                            .db
+                            .create_ai_interaction(AiInteractionParams {
+                                id: &i_id,
+                                parent_id: None,
+                                workflow_id: None,
+                                provider: &ctx.settings.ai.provider,
+                                model: &ctx.settings.ai.model,
+                                input: input_ctx,
+                                output: &output_raw,
+                                tokens_in: tokens_in as u32,
+                                tokens_out: json_output["tokens_out"].as_u64().unwrap_or(0) as u32,
+                                tokens_cached: json_output["tokens_cached"].as_u64().unwrap_or(0)
+                                    as u32,
+                            })
+                            .await;
+                        Some(i_id)
+                    } else {
+                        None
+                    };
+
+                    if target_applied {
+                        if let Some(error_msg) = json_output["error"].as_str() {
+                            error!(
+                                "Review tool returned error for ps={} idx={}: {}",
+                                patchset_id, index, error_msg
+                            );
+                            let _ = ctx
+                                .db
+                                .complete_review(
+                                    review_id,
+                                    ReviewStatus::Failed.as_str(),
+                                    error_msg,
+                                    None,
+                                    interaction_id.as_deref(),
+                                    None,
+                                    logs_str.as_deref(),
+                                )
+                                .await;
+
+                            if retries < max_retries {
+                                retries += 1;
+                                continue;
+                            } else {
+                                let _ = ctx.db.update_patch_status(patch_id, "Failed").await;
+                                return Ok(PatchResult::ReviewFailed);
+                            }
+                        } else if let Some(review_content) = json_output.get("review") {
+                            if !review_content.is_null() {
+                                if let Some(findings_arr) =
+                                    review_content.get("findings").and_then(|f| f.as_array())
+                                {
+                                    for f in findings_arr {
+                                        let severity_str = f["severity"].as_str().unwrap_or("Low");
+                                        let severity = Severity::from_str(severity_str);
+
+                                        let problem =
+                                            f["problem"].as_str().unwrap_or("").to_string();
+                                        let severity_explanation = f["severity_explanation"]
+                                            .as_str()
+                                            .map(|s| s.to_string());
+                                        let preexisting = f["preexisting"].as_bool();
+                                        let locations = f.get("locations").cloned();
+
+                                        let _ = ctx
+                                            .db
+                                            .create_finding(Finding {
+                                                review_id,
+                                                severity,
+                                                severity_explanation,
+                                                problem,
+                                                preexisting,
+                                                locations,
+                                                server_id: None,
+                                                source_server: None,
+                                            })
+                                            .await;
+                                    }
+                                }
+
+                                let summary =
+                                    review_content["summary"].as_str().unwrap_or("").to_string();
+                                let result_desc = "Review completed successfully.";
+
+                                let inline_review = json_output["inline_review"].as_str();
+
+                                let mut db_success = true;
+
+                                if let Err(e) = ctx
+                                    .db
+                                    .complete_review(
+                                        review_id,
+                                        ReviewStatus::Reviewed.as_str(),
+                                        result_desc,
+                                        Some(&summary),
+                                        interaction_id.as_deref(),
+                                        inline_review,
+                                        logs_str.as_deref(),
+                                    )
+                                    .await
+                                {
+                                    error!("Failed to save review completion: {}", e);
+                                    db_success = false;
+                                }
+
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs() as i64;
+
+                                if db_success {
+                                    let inline_opt = inline_review;
+                                    if let Some(inline) = inline_opt {
+                                        let mut skip_notify = false;
+                                        if let Some(until) = embargo_until.filter(|&u| u > now) {
+                                            info!(
+                                                "Review completed but embargoed until {} for patch {}",
+                                                until, patch_id
+                                            );
+                                            skip_notify = true;
+                                        }
+
+                                        if !skip_notify {
+                                            let patch_msg_id = input_payload["patches"]
+                                                .as_array()
+                                                .and_then(|arr| {
+                                                    arr.iter().find(|p| p["index"] == index)
+                                                })
+                                                .and_then(|p| p["message_id"].as_str())
+                                                .unwrap_or("");
+
+                                            let patchset_msg_id = input_payload["message_id"]
+                                                .as_str()
+                                                .unwrap_or(patch_msg_id);
+
+                                            if let Err(e) = Self::queue_notifications(
+                                                ctx,
+                                                patch_id,
+                                                patch_msg_id,
+                                                patchset_msg_id,
+                                                index,
+                                                inline,
+                                                review_content["findings"].as_array(),
+                                                &summary,
+                                            )
+                                            .await
+                                            {
+                                                error!(
+                                                    "Failed to queue email for patch {}: {}",
+                                                    patch_id, e
+                                                );
+                                                db_success = false;
+                                            }
+                                        }
+                                    }
+                                }
+                                if db_success {
+                                    let _ = ctx.db.update_patch_status(patch_id, "Reviewed").await;
+                                }
+                                return Ok(PatchResult::Success);
+                            } else if ctx.settings.ai.no_ai {
+                                info!(
+                                    "Review skipped as requested for ps={} idx={}",
+                                    patchset_id, index
+                                );
+                                let _ = ctx
+                                    .db
+                                    .complete_review(
+                                        review_id,
+                                        ReviewStatus::Skipped.as_str(),
+                                        "Skipped AI review via --no-ai",
+                                        None,
+                                        interaction_id.as_deref(),
+                                        None,
+                                        logs_str.as_deref(),
+                                    )
+                                    .await;
+                                let _ = ctx.db.update_patch_status(patch_id, "Skipped").await;
+                                return Ok(PatchResult::Success);
+                            } else {
+                                let _ = ctx
+                                    .db
+                                    .complete_review(
+                                        review_id,
+                                        ReviewStatus::Failed.as_str(),
+                                        "AI returned null response",
+                                        None,
+                                        interaction_id.as_deref(),
+                                        None,
+                                        logs_str.as_deref(),
+                                    )
+                                    .await;
+                                if retries < max_retries {
+                                    retries += 1;
+                                    continue;
+                                } else {
+                                    let _ = ctx.db.update_patch_status(patch_id, "Failed").await;
+                                    return Ok(PatchResult::ReviewFailed);
+                                }
+                            }
+                        } else {
+                            let error_msg = json_output["error"]
+                                .as_str()
+                                .unwrap_or("Missing review content");
+                            let _ = ctx
+                                .db
+                                .complete_review(
+                                    review_id,
+                                    ReviewStatus::Failed.as_str(),
+                                    error_msg,
+                                    None,
+                                    interaction_id.as_deref(),
+                                    None,
+                                    logs_str.as_deref(),
+                                )
+                                .await;
+                            let _ = ctx.db.update_patch_status(patch_id, "Failed").await;
+                            return Ok(PatchResult::ReviewFailed);
+                        }
+                    } else {
+                        // Tool failed to process or missing patches array
+                        let error_msg = json_output["error"]
+                            .as_str()
+                            .unwrap_or("Tool failed to return patch status");
+                        let _ = ctx
+                            .db
+                            .complete_review(
+                                review_id,
+                                ReviewStatus::Failed.as_str(),
+                                error_msg,
+                                None,
+                                interaction_id.as_deref(),
+                                None,
+                                logs_str.as_deref(),
+                            )
+                            .await;
+                        if retries < max_retries {
+                            retries += 1;
+                            continue;
+                        }
+                        let _ = ctx.db.update_patch_status(patch_id, "Failed").await;
+                        return Ok(PatchResult::ReviewFailed);
+                    }
+                }
+                Err(e) => {
+                    if e.to_string().contains(REVIEW_PAUSED_BY_SCHEDULE) {
+                        let _ = ctx
+                            .db
+                            .update_review_status(
+                                review_id,
+                                ReviewStatus::Pending.as_str(),
+                                Some(REVIEW_PAUSED_BY_SCHEDULE),
+                            )
+                            .await;
+                        info!(
+                            "Paused patch {}/{} (ID: {}) due to schedule window",
+                            patchset_id, index, patch_id
+                        );
+                        return Ok(PatchResult::PausedBySchedule);
+                    }
+                    error!("Review execution failed for {}: {}", patchset_id, e);
+                    let _ = ctx
+                        .db
+                        .complete_review(
+                            review_id,
+                            ReviewStatus::Failed.as_str(),
+                            &format!("Tool error: {}", e),
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                        .await;
+                    if retries < max_retries {
+                        retries += 1;
+                        continue;
+                    }
+                    let _ = ctx.db.update_patch_status(patch_id, "Failed").await;
+                    return Ok(PatchResult::ReviewFailed);
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_review_tool(
+    patchset_id: i64,
+    input_payload: &serde_json::Value,
+    settings: &Settings,
+    db: Arc<Database>,
+    baseline: &str,
+    review_index: Option<i64>,
+    review_commit: Option<String>,
+    quota_manager: Arc<QuotaManager>,
+    review_id: i64,
+    worktree_path: Option<&Path>,
+    provider: Arc<dyn AiProvider>,
+) -> Result<serde_json::Value> {
+    let mut cmd = if let Some(ref override_bin) = settings.review.review_tool_override {
+        Command::new(override_bin)
+    } else {
+        let exe_path = std::env::current_exe()?;
+        let bin_dir = exe_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let review_bin = bin_dir.join("review");
+        if review_bin.exists() {
+            Command::new(review_bin)
+        } else {
+            warn!(
+                "Could not find review binary at {:?}, falling back to cargo run",
+                review_bin
+            );
+            let mut c = Command::new("cargo");
+            c.args(["run", "--bin", "review", "--"]);
+            c
+        }
+    };
+
+    cmd.args([
+        "--json",
+        "--baseline",
+        baseline,
+        "--worktree-dir",
+        &settings.review.worktree_dir,
+        "--ai-provider",
+        match settings.ai.provider.as_str() {
+            "claude" | "stdio-claude" | "claude-cli" | "codex-cli" | "copilot-cli" | "kiro-cli" => {
+                "stdio-claude"
+            }
+            _ => "stdio-gemini",
+        },
+    ]);
+
+    cmd.env_clear();
+
+    // Only restore critical, non-sensitive system variables
+    for var in &["PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM"] {
+        if let Ok(val) = std::env::var(var) {
+            cmd.env(var, val);
+        }
+    }
+
+    cmd.env("NO_COLOR", "1");
+    cmd.env("SASHIKO_LOG_PLAIN", "1");
+
+    // Forward SASHIKO_* env vars to the child so that env-var overrides
+    // (e.g. SASHIKO_AI__MODEL, SASHIKO_GIT__REPOSITORY_PATH) are visible
+    // to the review binary's config loading.
+    for (key, value) in std::env::vars() {
+        if key.starts_with("SASHIKO_") {
+            cmd.env(&key, &value);
+        }
+    }
+
+    if let Some(idx) = review_index {
+        cmd.arg("--review-patch-index").arg(idx.to_string());
+    }
+
+    if let Some(commit) = review_commit {
+        cmd.arg("--review-commit").arg(commit);
+    }
+
+    if settings.ai.no_ai {
+        cmd.arg("--no-ai");
+    }
+
+    if let Some(path) = worktree_path {
+        cmd.arg("--reuse-worktree").arg(path);
+    }
+
+    if let Some(stages) = &settings.review.stages {
+        let stages_str = stages
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        cmd.arg("--stages").arg(stages_str);
+    }
+
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    cmd.kill_on_drop(true);
+
+    let mut child = cmd.spawn()?;
+
+    if let Some(stderr) = child.stderr.take() {
+        tokio::spawn(async move {
+            let reader = BufReader::new(stderr);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if line.contains(" ERROR ")
+                    || line.starts_with("Error:")
+                    || line.contains("panicked")
+                {
+                    error!("[review-bin] {}", line);
+                } else if line.contains(" WARN ") {
+                    warn!("[review-bin] {}", line);
+                } else {
+                    info!("[review-bin] {}", line);
+                }
+            }
+        });
+    }
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("No stdin"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("No stdout"))?;
+
+    use std::time::Duration;
+    use tokio::time::Instant as TokioInstant;
+    use tokio::time::timeout_at;
+
+    // Perform interaction with timeout
+    let mut deadline = TokioInstant::now() + Duration::from_secs(settings.review.timeout_seconds);
+
+    let interaction_result =
+        async {
+            if !should_process_reviews_now(settings) {
+                return Err(anyhow::anyhow!(REVIEW_PAUSED_BY_SCHEDULE));
+            }
+
+            // Send initial payload
+            let mut input_str = serde_json::to_string(input_payload)?;
+            input_str.push('\n');
+            stdin.write_all(input_str.as_bytes()).await?;
+            stdin.flush().await?;
+
+            let reader = BufReader::new(stdout);
+            let mut lines = reader.lines();
+            let mut final_result: Option<Value> = None;
+            let mut ai_started = false;
+            let mut total_tokens_used: usize = 0;
+            let mut total_output_tokens_used: usize = 0;
+            let mut turn_count = 0u32;
+
+            loop {
+                let line_result = match tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                        if !should_process_reviews_now(settings) {
+                            Err(anyhow::anyhow!(REVIEW_PAUSED_BY_SCHEDULE))
+                        } else {
+                            continue;
+                        }
+                    }
+                    res = timeout_at(deadline, lines.next_line()) => {
+                        match res {
+                            Ok(inner) => Ok(inner),
+                            Err(_) => Err(anyhow::anyhow!("Review tool timed out (active time exceeded)")),
+                        }
+                    }
+                } {
+                    Ok(res) => res,
+                    Err(e) => return Err(e),
+                };
+
+                let line = match line_result {
+                    Ok(Some(l)) => l,
+                    Ok(None) => break,
+                    Err(e) => {
+                        tracing::error!("Error reading line from child: {}", e);
+                        break;
+                    }
+                };
+                // Try to parse as JSON
+                if let Ok(json_msg) = serde_json::from_str::<Value>(&line) {
+                    if let Some(type_str) = json_msg.get("type").and_then(|v| v.as_str()) {
+                        match type_str {
+                            "ai_request" | "ai_request_with_cache" => {
+                                if !ai_started {
+                                    let _ = db
+                                        .update_review_status(
+                                            review_id,
+                                            ReviewStatus::InReview.as_str(),
+                                            None,
+                                        )
+                                        .await;
+                                    ai_started = true;
+                                }
+                                if let Some(payload_val) = json_msg.get("payload")
+                                    && let Ok(req) =
+                                        serde_json::from_value::<AiRequest>(payload_val.clone())
+                                {
+                                    turn_count += 1;
+                                    if settings.ai.log_turns {
+                                        let n_msgs = req.messages.len();
+                                        let last = req.messages.last();
+                                        let role_str = last.map(|m| format!("{:?}", m.role).to_lowercase()).unwrap_or_default();
+                                        let content_preview = last.and_then(|m| m.content.as_deref()).unwrap_or("(no text content)");
+                                        let preview: String = content_preview.chars().take(300).collect();
+                                        let ellipsis = if content_preview.chars().count() > 300 { "…" } else { "" };
+                                        if let Some(tool_calls) = last.and_then(|m| m.tool_calls.as_ref()) {
+                                            let names: Vec<&str> = tool_calls.iter().map(|t| t.function_name.as_str()).collect();
+                                            info!("→ Turn {} ({} msgs): [{role_str}] tool_calls={:?}", turn_count, n_msgs, names);
+                                        } else {
+                                            info!("→ Turn {} ({} msgs): [{role_str}] {}{}", turn_count, n_msgs, preview, ellipsis);
+                                        }
+                                    }
+                                    let ctx_tag = req.context_tag.clone().unwrap_or_default();
+                                    let resp_payload = crate::ai::LOG_CONTEXT.scope(ctx_tag, async {
+                                    let mut local_transient_errors = 0;
+                                    loop {
+                                        let slept = quota_manager.wait_for_access().await;
+                                        deadline += slept;
+
+                                        if TokioInstant::now() > deadline {
+                                            break Err(anyhow::anyhow!(
+                                                "Review tool timed out (active time exceeded)"
+                                            ));
+                                        }
+
+                                        match provider.generate_content(req.clone()).await {
+                                            Ok(resp) => {
+                                                quota_manager.report_success().await;
+                                                break Ok(resp);
+                                            }
+                                            Err(e) => {
+                                                match classify_ai_error(&e) {
+                                                    AiErrorClass::RateLimit { retry_after } => {
+                                                        quota_manager
+                                                            .report_quota_error(retry_after)
+                                                            .await;
+                                                        continue;
+                                                    }
+                                                    AiErrorClass::Transient { retry_after } => {
+                                                        local_transient_errors += 1;
+                                                        let backoff_secs = (1.0 * (2.0_f64.powi(local_transient_errors - 1))).min(60.0);
+                                                        let backoff = std::time::Duration::from_secs_f64(backoff_secs).max(retry_after);
+                                                        tracing::warn!(
+                                                            "AI provider transient error (streak: {}). Locally backing off for {:.2}s",
+                                                            local_transient_errors,
+                                                            backoff.as_secs_f64()
+                                                        );
+                                                        tokio::time::sleep(backoff).await;
+                                                        continue;
+                                                    }
+                                                    AiErrorClass::Fatal => break Err(e),
+                                                }
+                                            }
+                                        }
+                                    }
+                                }).await;
+
+                                    let reply = match resp_payload {
+                                        Ok(p) => {
+                                            if let Some(usage) = &p.usage {
+                                                let cached = usage.cached_tokens.unwrap_or(0);
+                                                let uncached_input = usage.prompt_tokens.saturating_sub(cached);
+                                                total_tokens_used += uncached_input + usage.completion_tokens;
+                                                total_output_tokens_used += usage.completion_tokens;
+                                                let token_budget = settings.review.max_total_tokens;
+                                                if token_budget > 0 && total_tokens_used > token_budget {
+                                                    error!("Token budget exceeded: {} uncached input + output tokens used > {} limit — aborting review",
+                                                        total_tokens_used, token_budget);
+                                                    return Err(ReviewError::BudgetExceeded(
+                                                        format!("Token budget exceeded: {} uncached input + output tokens used (limit: {})",
+                                                            total_tokens_used, token_budget)
+                                                    ).into());
+                                                }
+                                                let output_budget = settings.review.max_total_output_tokens;
+                                                if output_budget > 0 && total_output_tokens_used > output_budget {
+                                                    error!("Output token budget exceeded: {} output tokens used > {} limit — aborting review",
+                                                        total_output_tokens_used, output_budget);
+                                                    return Err(ReviewError::BudgetExceeded(
+                                                        format!("Output token budget exceeded: {} output tokens used (limit: {})",
+                                                            total_output_tokens_used, output_budget)
+                                                    ).into());
+                                                }
+                                            }
+                                            if settings.ai.log_turns {
+                                                if let Some(content) = &p.content {
+                                                    let preview: String = content.chars().take(500).collect();
+                                                    let ellipsis = if content.chars().count() > 500 { "…" } else { "" };
+                                                    info!("← Turn {} text: {}{}", turn_count, preview, ellipsis);
+                                                }
+                                                if let Some(tool_calls) = &p.tool_calls {
+                                                    for call in tool_calls {
+                                                        let args_str = call.arguments.to_string();
+                                                        let args_preview: String = args_str.chars().take(200).collect();
+                                                        let ellipsis = if args_str.chars().count() > 200 { "…" } else { "" };
+                                                        info!("← Turn {} tool_call: {}({}{})", turn_count, call.function_name, args_preview, ellipsis);
+                                                    }
+                                                }
+                                                if let Some(usage) = &p.usage {
+                                                    info!("← Turn {} tokens: in={} out={} cached={}",
+                                                        turn_count, usage.prompt_tokens, usage.completion_tokens,
+                                                        usage.cached_tokens.unwrap_or(0));
+                                                }
+                                            }
+                                            if let Some(tool_calls) = &p.tool_calls {
+                                                for call in tool_calls {
+                                                    let _ = db
+                                                        .create_tool_usage(crate::db::ToolUsage {
+                                                            review_id,
+                                                            provider: settings.ai.provider.clone(),
+                                                            model: settings.ai.model.clone(),
+                                                            tool_name: call.function_name.clone(),
+                                                            arguments: Some(
+                                                                call.arguments.to_string(),
+                                                            ),
+                                                            output_length: 0,
+                                                        })
+                                                        .await;
+                                                }
+                                            }
+                                            json!({ "type": "ai_response", "payload": p })
+                                        }
+                                        Err(e) => {
+                                            let message = e.to_string();
+                                            let class = classify_ai_error(&e);
+                                            let payload = RemoteAiErrorPayload::new(message, class);
+                                            json!({ "type": "error", "payload": payload })
+                                        }
+                                    };
+                                    let mut reply_str = serde_json::to_string(&reply)?;
+                                    reply_str.push('\n');
+                                    if let Err(e) = stdin.write_all(reply_str.as_bytes()).await {
+                                        error!("Failed to write AI response to child: {}", e);
+                                        break;
+                                    }
+                                    let _ = stdin.flush().await;
+                                }
+                            }
+                            _ => {
+                                // Unknown type. Assume it's result if it matches result structure.
+                                if json_msg.get("patchset_id").is_some() {
+                                    final_result = Some(json_msg);
+                                    break;
+                                }
+                            }
+                        }
+                    } else {
+                        // No type. Result?
+                        if json_msg.get("patchset_id").is_some() {
+                            final_result = Some(json_msg);
+                            break;
+                        }
+                    }
+                } else {
+                    // Non-JSON line. Log it.
+                    warn!("Review tool stdout: {}", line);
+                }
+            }
+
+            // Return result
+            if let Some(res) = final_result {
+                Ok(res)
+            } else {
+                Err(anyhow::anyhow!("Review tool finished without valid result"))
+            }
+        }
+        .await;
+
+    // Handle timeout/schedule interruption and child process cleanup
+    if let Err(e) = &interaction_result {
+        if e.to_string()
+            .contains("Review tool timed out (active time exceeded)")
+            || e.to_string().contains(REVIEW_PAUSED_BY_SCHEDULE)
+        {
+            let _ = child.kill().await;
+        }
+    }
+
+    drop(stdin); // Close stdin to signal EOF/finish to child if it's still running
+    let _ = child.wait().await; // Reap zombie
+
+    match interaction_result {
+        Ok(json) => {
+            // Update DB with patch statuses if final_result available
+            if let Some(patches) = json["patches"].as_array() {
+                for p in patches {
+                    let idx = p["index"].as_i64().unwrap_or(0);
+                    let status = p["status"].as_str().unwrap_or("error");
+
+                    let stderr_str = p["stderr"].as_str().unwrap_or("");
+                    let stdout_str = p["stdout"].as_str().unwrap_or("");
+                    let am_error = p["am_error"].as_str().unwrap_or("");
+
+                    let mut full_log = String::new();
+                    if !am_error.is_empty() {
+                        full_log.push_str("git am error:\n");
+                        full_log.push_str(am_error);
+                        full_log.push_str("\n\n");
+                    }
+                    if !stdout_str.is_empty() {
+                        full_log.push_str("stdout:\n");
+                        full_log.push_str(stdout_str);
+                        full_log.push('\n');
+                    }
+                    if !stderr_str.is_empty() {
+                        full_log.push_str("stderr:\n");
+                        full_log.push_str(stderr_str);
+                    }
+
+                    let error_msg = if full_log.trim().is_empty() {
+                        None
+                    } else {
+                        Some(full_log.as_str())
+                    };
+
+                    if let Err(e) = db
+                        .update_patch_application_status(patchset_id, idx, status, error_msg)
+                        .await
+                    {
+                        error!(
+                            "Failed to update patch status for ps={} idx={}: {}",
+                            patchset_id, idx, e
+                        );
+                    }
+                }
+            }
+            Ok(json)
+        }
+        Err(e) => {
+            if e.to_string()
+                .contains("Review tool timed out (active time exceeded)")
+            {
+                error!(
+                    "Review tool timed out after {} active seconds. Killing process.",
+                    settings.review.timeout_seconds
+                );
+            } else if e.to_string().contains(REVIEW_PAUSED_BY_SCHEDULE) {
+                info!(
+                    "Review tool interrupted because current time is outside review schedule window."
+                );
+            }
+            Err(e)
+        }
+    }
+}
+impl Reviewer {
+    #[allow(clippy::too_many_arguments)]
+    async fn queue_notifications(
+        ctx: &ReviewContext,
+        patch_id: i64,
+        patch_message_id: &str,
+        patchset_message_id: &str,
+        index: i64,
+        inline_review: &str,
+        findings: Option<&Vec<Value>>,
+        _summary: &str,
+    ) -> Result<()> {
+        let already_processed = {
+            let mut rows = ctx
+                .db
+                .conn
+                .query(
+                    "SELECT 1 FROM email_outbox WHERE patch_id = ?",
+                    libsql::params![patch_id],
+                )
+                .await?;
+            matches!(rows.next().await, Ok(Some(_)))
+        };
+
+        if already_processed {
+            info!(
+                "Notification already processed for patch_id {}, skipping.",
+                patch_id
+            );
+            return Ok(());
+        }
+
+        let sender_address = match &ctx.settings.smtp {
+            Some(s) => s.sender_address.clone(),
+            None => {
+                info!("SMTP not configured, recording email as disabled.");
+                "sashiko-bot@localhost".to_string()
+            }
+        };
+
+        let findings_count = findings.map(|f| f.len()).unwrap_or(0);
+
+        let msg_id = patch_message_id;
+        let patchset_msg_id = patchset_message_id;
+        let patchset_msg_id_clean = patchset_msg_id.trim_matches(|c| c == '<' || c == '>');
+
+        let msg_details = match ctx.db.get_message_details_by_msgid(msg_id).await? {
+            Some(d) => d,
+            None => return Ok(()),
+        };
+
+        let policy = EmailPolicyConfig::load(&ctx.settings.review.email_policy_path)
+            .unwrap_or_else(|_| EmailPolicyConfig {
+                defaults: Default::default(),
+                subsystems: Default::default(),
+            });
+
+        let to_list: Vec<String> = msg_details
+            .to
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let cc_list: Vec<String> = msg_details
+            .cc
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let patch_author = msg_details.author.unwrap_or_default();
+        let patch_subject = msg_details.subject.unwrap_or_default();
+
+        let target_url = format!(
+            "https://sashiko.dev/#/patchset/{}?part={}",
+            patchset_msg_id_clean, index
+        );
+
+        let patchwork_policies =
+            crate::email_router::EmailRouter::resolve_patchwork(&policy, &to_list, &cc_list);
+
+        let patchwork_status = if findings_count > 0 {
+            "warning"
+        } else {
+            "success"
+        };
+        let patchwork_desc = if findings_count > 0 {
+            format!(
+                "Sashiko AI review found {} potential issue(s)",
+                findings_count
+            )
+        } else {
+            "Sashiko AI review found no regressions".to_string()
+        };
+
+        for pw_policy in patchwork_policies {
+            let msg_id_owned = msg_id.to_string();
+            let status_owned = patchwork_status.to_string();
+            let desc_owned = patchwork_desc.clone();
+            let url_owned = target_url.clone();
+            tokio::spawn(async move {
+                crate::patchwork::post_patchwork_check(
+                    &pw_policy,
+                    &msg_id_owned,
+                    &status_owned,
+                    &desc_owned,
+                    &url_owned,
+                )
+                .await;
+            });
+        }
+
+        let action = EmailRouter::resolve_recipients(
+            &policy,
+            &to_list,
+            &cc_list,
+            &patch_author,
+            &sender_address,
+        );
+
+        if findings_count == 0 {
+            let mut sent_positive_review = false;
+            if let EmailAction::Send {
+                to,
+                cc,
+                send_positive_review,
+            } = &action
+                && *send_positive_review
+            {
+                let mut body_head = String::new();
+                if let Some(body) = &msg_details.body {
+                    let mut commit_msg_lines = Vec::new();
+                    for line in body.lines() {
+                        if line == "---" || line.starts_with("diff --git ") {
+                            break;
+                        }
+                        commit_msg_lines.push(line);
+                    }
+
+                    let mut sob_index = None;
+                    for (i, line) in commit_msg_lines.iter().enumerate().rev() {
+                        if line.to_lowercase().starts_with("signed-off-by:") {
+                            sob_index = Some(i);
+                            break;
+                        }
+                    }
+
+                    let end_index = sob_index.unwrap_or(commit_msg_lines.len().saturating_sub(1));
+                    if !commit_msg_lines.is_empty() && end_index < commit_msg_lines.len() {
+                        let head_lines = &commit_msg_lines[0..=end_index];
+                        if head_lines.len() > 30 {
+                            let top = 15;
+                            let bottom = 5;
+                            for line in &head_lines[0..top] {
+                                body_head.push_str("> ");
+                                body_head.push_str(line);
+                                body_head.push('\n');
+                            }
+                            body_head.push_str("> [ ... ]\n");
+                            for line in &head_lines
+                                [head_lines.len().saturating_sub(bottom)..head_lines.len()]
+                            {
+                                body_head.push_str("> ");
+                                body_head.push_str(line);
+                                body_head.push('\n');
+                            }
+                        } else {
+                            for line in head_lines {
+                                body_head.push_str("> ");
+                                body_head.push_str(line);
+                                body_head.push('\n');
+                            }
+                        }
+                    }
+                }
+
+                if !body_head.is_empty() {
+                    let to_json = serde_json::to_string(&to).unwrap_or_else(|_| "[]".to_string());
+                    let cc_json = serde_json::to_string(&cc).unwrap_or_else(|_| "[]".to_string());
+                    let subject_prefix = if patch_subject.to_lowercase().starts_with("re:") {
+                        ""
+                    } else {
+                        "Re: "
+                    };
+                    let final_subject = format!("{}{}", subject_prefix, patch_subject);
+                    let final_body = format!(
+                        "{}\nSashiko has reviewed this patch and found no issues. It looks great!\n\n-- \nSashiko AI review · {}\n",
+                        body_head, target_url
+                    );
+
+                    ctx.db
+                        .insert_email_outbox(
+                            patch_id,
+                            "Pending",
+                            &to_json,
+                            &cc_json,
+                            &final_subject,
+                            msg_id.trim_matches(|c| c == '<' || c == '>'),
+                            msg_id.trim_matches(|c| c == '<' || c == '>'),
+                            &final_body,
+                        )
+                        .await?;
+                    sent_positive_review = true;
+                }
+            }
+
+            if !sent_positive_review {
+                info!("No issues found for patch {}, skipping email.", patch_id);
+                ctx.db
+                    .insert_email_outbox(
+                        patch_id,
+                        "Skipped",
+                        "[]",
+                        "[]",
+                        "Skipped",
+                        msg_id.trim_matches(|c| c == '<' || c == '>'),
+                        msg_id.trim_matches(|c| c == '<' || c == '>'),
+                        "Skipped due to no findings",
+                    )
+                    .await?;
+            }
+            return Ok(());
+        }
+
+        match action {
+            EmailAction::Mute => {
+                info!("Email policy muted email for patch {}", patch_id);
+                ctx.db
+                    .insert_email_outbox(
+                        patch_id,
+                        "Muted",
+                        "[]",
+                        "[]",
+                        "Muted",
+                        msg_id.trim_matches(|c| c == '<' || c == '>'),
+                        msg_id.trim_matches(|c| c == '<' || c == '>'),
+                        "Muted by policy",
+                    )
+                    .await?;
+            }
+            EmailAction::Send { to, cc, .. } => {
+                let to_json = serde_json::to_string(&to)?;
+                let cc_json = serde_json::to_string(&cc)?;
+
+                let subject_prefix = if patch_subject.to_lowercase().starts_with("re:") {
+                    ""
+                } else {
+                    "Re: "
+                };
+                let final_subject = format!("{}{}", subject_prefix, patch_subject);
+
+                let msg_id_clean = msg_id.trim_matches(|c| c == '<' || c == '>');
+
+                let mut header = String::new();
+
+                if let Some(findings_arr) = findings
+                    && !findings_arr.is_empty()
+                {
+                    header.push_str(&format!(
+                        "Thank you for your contribution! Sashiko AI review found {} potential issue(s) to consider:\n",
+                        findings_arr.len()
+                    ));
+
+                    let mut new_findings = Vec::new();
+                    let mut preexisting_findings = Vec::new();
+
+                    for f in findings_arr {
+                        let preexisting = f
+                            .get("preexisting")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        if preexisting {
+                            preexisting_findings.push(f.clone());
+                        } else {
+                            new_findings.push(f.clone());
+                        }
+                    }
+
+                    let sort_by_severity = |a: &Value, b: &Value| {
+                        let sev_a = Severity::from_str(
+                            a.get("severity").and_then(|v| v.as_str()).unwrap_or("Low"),
+                        );
+                        let sev_b = Severity::from_str(
+                            b.get("severity").and_then(|v| v.as_str()).unwrap_or("Low"),
+                        );
+                        sev_b.cmp(&sev_a)
+                    };
+
+                    new_findings.sort_by(sort_by_severity);
+                    preexisting_findings.sort_by(sort_by_severity);
+
+                    let format_finding = |f: &Value| {
+                        let problem = f
+                            .get("problem")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Unknown issue")
+                            .trim();
+                        let severity = f
+                            .get("severity")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Unknown");
+                        format!("- [{}] {}\n", severity, problem)
+                    };
+
+                    if !new_findings.is_empty() && !preexisting_findings.is_empty() {
+                        header.push_str("\nNew issues:\n");
+                        for f in &new_findings {
+                            header.push_str(&format_finding(f));
+                        }
+                        header.push_str("\nPre-existing issues:\n");
+                        for f in &preexisting_findings {
+                            header.push_str(&format_finding(f));
+                        }
+                    } else if !new_findings.is_empty() {
+                        for f in &new_findings {
+                            header.push_str(&format_finding(f));
+                        }
+                    } else if !preexisting_findings.is_empty() {
+                        header.push_str("\nPre-existing issues:\n");
+                        for f in &preexisting_findings {
+                            header.push_str(&format_finding(f));
+                        }
+                    }
+
+                    header.push_str("--\n\n");
+                }
+
+                let mut footer = String::new();
+
+                footer.push_str(&format!("\n\n-- \nSashiko AI review · {}", target_url));
+
+                let final_body = format!("{}{}{}", header, inline_review.trim_end(), footer);
+
+                let status = match &ctx.settings.smtp {
+                    None => "Disabled",
+                    Some(s) if s.dry_run => "Dry-Run",
+                    _ => "Pending",
+                };
+
+                ctx.db
+                    .insert_email_outbox(
+                        patch_id,
+                        status,
+                        &to_json,
+                        &cc_json,
+                        &final_subject,
+                        msg_id_clean,
+                        msg_id_clean,
+                        &final_body,
+                    )
+                    .await?;
+
+                info!("Queued email for patch {}", patch_id);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::quota::QuotaManager;
+    use crate::ai::{AiRequest, AiResponse, ProviderCapabilities};
+    use crate::db::Database;
+    use crate::settings::Settings;
+    use async_trait::async_trait;
+    use std::fs::File;
+    use std::io::Write;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tempfile::tempdir;
+
+    struct MockProvider;
+    #[async_trait]
+    impl AiProvider for MockProvider {
+        async fn generate_content(&self, _request: AiRequest) -> Result<AiResponse> {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            Ok(AiResponse {
+                content: Some("<final_verdict>Mocked AI response</final_verdict>".to_string()),
+                thought: None,
+                thought_signature: None,
+                tool_calls: None,
+                usage: None,
+            })
+        }
+        fn estimate_tokens(&self, _request: &AiRequest) -> usize {
+            0
+        }
+        fn get_capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                model_name: "mock".to_string(),
+                context_window_size: 1000,
+            }
+        }
+    }
+
+    struct FailingProvider;
+
+    #[async_trait]
+    impl AiProvider for FailingProvider {
+        async fn generate_content(&self, _request: AiRequest) -> Result<AiResponse> {
+            Err(anyhow::anyhow!("fatal provider failure"))
+        }
+
+        fn estimate_tokens(&self, _request: &AiRequest) -> usize {
+            0
+        }
+
+        fn get_capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                model_name: "mock".to_string(),
+                context_window_size: 1000,
+            }
+        }
+    }
+
+    struct RateLimitThenSuccessProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl AiProvider for RateLimitThenSuccessProvider {
+        async fn generate_content(&self, _request: AiRequest) -> Result<AiResponse> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(crate::ai::openai::OpenAiCompatError::RateLimitExceeded(
+                    std::time::Duration::from_millis(1),
+                )
+                .into());
+            }
+
+            Ok(AiResponse {
+                content: Some("Recovered after rate limit".to_string()),
+                thought: None,
+                thought_signature: None,
+                tool_calls: None,
+                usage: None,
+            })
+        }
+
+        fn estimate_tokens(&self, _request: &AiRequest) -> usize {
+            0
+        }
+
+        fn get_capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                model_name: "mock".to_string(),
+                context_window_size: 1000,
+            }
+        }
+    }
+
+    async fn run_single_ai_request_mock(
+        mock_script: &str,
+        provider: Arc<dyn AiProvider>,
+    ) -> Result<Value> {
+        let temp_dir = tempdir()?;
+        let bin_path = temp_dir.path().join("mock_review");
+
+        std::fs::write(&bin_path, mock_script)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755))?;
+        }
+
+        let mut settings = Settings::new()?;
+        settings.database.url = ":memory:".to_string();
+        settings.review.review_tool_override = Some(bin_path);
+        settings.review.timeout_seconds = 5;
+
+        let db = Arc::new(Database::new(&settings.database).await?);
+        db.migrate().await?;
+        let quota_manager = Arc::new(QuotaManager::new());
+
+        let thread_id = db.create_thread("msg_id_1", "Subject", 1000).await?;
+        db.create_message(
+            "msg_id_p1",
+            thread_id,
+            None,
+            "Author",
+            "Subject",
+            1000,
+            "Body",
+            "",
+            "",
+            None,
+            None,
+        )
+        .await?;
+        let ps_id = db
+            .create_patchset(
+                thread_id, None, "msg_id_1", "Subject", "Author", 1000, 1, 1, "", "", None, 1,
+                None, false, None, None,
+            )
+            .await?
+            .expect("Failed to create patchset");
+        let p_id = db
+            .create_patch(ps_id, "msg_id_p1", 1, "diff --git a/foo.c b/foo.c\n+int x;")
+            .await?;
+        let review_id = db
+            .create_review(ps_id, Some(p_id), "mock", "mock", None, None)
+            .await?;
+
+        run_review_tool(
+            ps_id,
+            &json!({}),
+            &settings,
+            db,
+            "HEAD",
+            Some(1),
+            None,
+            quota_manager,
+            review_id,
+            None,
+            provider,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_run_review_tool_concurrency() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let bin_path = temp_dir.path().join("mock_review");
+
+        // Create a mock "review" binary that:
+        // 1. Reads initial JSON from stdin.
+        // 2. Spams 1000 lines of logs to STDOUT.
+        // 3. Sends an 'ai_request' JSON to STDOUT.
+        // 4. Reads 'ai_response' from stdin.
+        // 5. Prints final result JSON to STDOUT.
+        let mock_script = r#"#!/bin/bash
+# 1. Read input
+read -r input
+
+# 2. Spam logs
+for i in {1..1000}; do
+    echo "LOG LINE $i - This is a long log line to fill up buffers and test if the parent drains stdout correctly while waiting for AI response."
+done
+
+# 3. Send AI request
+echo '{"type": "ai_request", "payload": {"messages": [{"role": "user", "content": "hello"}], "temperature": 0.5}}'
+
+# 4. Wait for AI response
+read -r ai_response
+
+# 5. Send final result
+echo '{"patchset_id": 1, "patches": [{"index": 1, "status": "applied"}]}'
+"#;
+
+        std::fs::write(&bin_path, mock_script)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755))?;
+        }
+
+        // Setup Sashiko dependencies
+        let mut settings = Settings::new()?;
+        settings.database.url = ":memory:".to_string();
+
+        let _db = Arc::new(Database::new(&settings.database).await?);
+        let _quota_manager = Arc::new(QuotaManager::new());
+        let provider = Arc::new(MockProvider);
+        // We manually spawn the mock and run the same loop as run_review_tool
+        let mut cmd = Command::new(&bin_path);
+        cmd.stdin(Stdio::piped());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        cmd.kill_on_drop(true);
+
+        let mut child = cmd.spawn()?;
+        let mut stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+
+        let interaction = async {
+            // 1. Send input
+            stdin.write_all(b"{}\n").await?;
+            stdin.flush().await?;
+
+            let mut reader = BufReader::new(stdout).lines();
+            let mut final_result = None;
+
+            while let Ok(Some(line)) = reader.next_line().await {
+                if let Ok(json_msg) = serde_json::from_str::<Value>(&line) {
+                    if json_msg["type"] == "ai_request" {
+                        // Concurrency check: We are here, the child already sent 1000 log lines.
+                        // If the parent didn't drain them, the child would be blocked on write
+                        // and we would never receive this ai_request.
+
+                        let resp = provider
+                            .generate_content(AiRequest {
+                                system: None,
+                                messages: vec![],
+                                tools: None,
+                                temperature: None,
+                                response_format: None,
+                                context_tag: None,
+                            })
+                            .await?;
+
+                        let reply = json!({ "type": "ai_response", "payload": resp });
+                        let mut reply_str = serde_json::to_string(&reply)?;
+                        reply_str.push('\n');
+                        stdin.write_all(reply_str.as_bytes()).await?;
+                        stdin.flush().await?;
+                    } else if json_msg.get("patchset_id").is_some() {
+                        final_result = Some(json_msg);
+                        break;
+                    }
+                } else {
+                    // This is where logs are drained
+                    // println!("Log: {}", line);
+                }
+            }
+            Ok::<Option<Value>, anyhow::Error>(final_result)
+        };
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), interaction).await??;
+
+        assert!(result.is_some());
+        assert_eq!(result.unwrap()["patchset_id"], 1);
+
+        child.wait().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_run_review_tool_sends_typed_fatal_error_payload() -> Result<()> {
+        let mock_script = r#"#!/bin/bash
+read -r input
+echo '{"type":"ai_request","payload":{"messages":[{"role":"user","content":"hello"}]}}'
+read -r ai_response
+if [[ "$ai_response" == *'"type":"error"'* && "$ai_response" == *'"message":"fatal provider failure"'* && "$ai_response" == *'"class":"fatal"'* ]]; then
+    echo '{"patchset_id":1,"patches":[{"index":1,"status":"typed_fatal"}]}'
+else
+    echo '{"patchset_id":1,"patches":[{"index":1,"status":"unexpected"}]}'
+fi
+"#;
+
+        let result = run_single_ai_request_mock(mock_script, Arc::new(FailingProvider)).await?;
+
+        assert_eq!(result["patches"][0]["status"], "typed_fatal");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_run_review_tool_retries_rate_limits_without_child_error() -> Result<()> {
+        let mock_script = r#"#!/bin/bash
+read -r input
+echo '{"type":"ai_request","payload":{"messages":[{"role":"user","content":"hello"}]}}'
+read -r ai_response
+if [[ "$ai_response" == *'"type":"error"'* ]]; then
+    echo '{"patchset_id":1,"patches":[{"index":1,"status":"error_written"}]}'
+else
+    echo '{"patchset_id":1,"patches":[{"index":1,"status":"applied"}]}'
+fi
+"#;
+        let provider = Arc::new(RateLimitThenSuccessProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let provider_for_tool: Arc<dyn AiProvider> = provider.clone();
+
+        let result = run_single_ai_request_mock(mock_script, provider_for_tool).await?;
+
+        assert_eq!(result["patches"][0]["status"], "applied");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_prepare_baseline_worktree_uses_baseline_repo_url() -> Result<()> {
+        let settings_dir = tempdir()?;
+        let settings_repo = settings_dir.path().join("settings-repo");
+        let source_dir = tempdir()?;
+        let source_repo = source_dir.path().join("source-repo");
+        std::fs::create_dir_all(&settings_repo)?;
+        std::fs::create_dir_all(&source_repo)?;
+
+        for repo in [&settings_repo, &source_repo] {
+            Command::new("git")
+                .current_dir(repo)
+                .arg("init")
+                .output()
+                .await?;
+            Command::new("git")
+                .current_dir(repo)
+                .args(["config", "user.name", "Test User"])
+                .output()
+                .await?;
+            Command::new("git")
+                .current_dir(repo)
+                .args(["config", "user.email", "test@example.com"])
+                .output()
+                .await?;
+        }
+
+        let mut settings_file = File::create(settings_repo.join("settings.txt"))?;
+        writeln!(settings_file, "settings only")?;
+        Command::new("git")
+            .current_dir(&settings_repo)
+            .args(["add", "."])
+            .output()
+            .await?;
+        Command::new("git")
+            .current_dir(&settings_repo)
+            .args(["commit", "-m", "Settings root"])
+            .output()
+            .await?;
+
+        let mut source_file = File::create(source_repo.join("source.txt"))?;
+        writeln!(source_file, "base")?;
+        Command::new("git")
+            .current_dir(&source_repo)
+            .args(["add", "."])
+            .output()
+            .await?;
+        Command::new("git")
+            .current_dir(&source_repo)
+            .args(["commit", "-m", "Base"])
+            .output()
+            .await?;
+        let base_sha = get_commit_hash(&source_repo, "HEAD").await?;
+
+        let mut source_file = File::create(source_repo.join("source.txt"))?;
+        writeln!(source_file, "feature")?;
+        Command::new("git")
+            .current_dir(&source_repo)
+            .args(["add", "."])
+            .output()
+            .await?;
+        Command::new("git")
+            .current_dir(&source_repo)
+            .args(["commit", "-m", "Feature"])
+            .output()
+            .await?;
+        let feature_sha = get_commit_hash(&source_repo, "HEAD").await?;
+
+        let mut settings = Settings::new()?;
+        settings.database.url = ":memory:".to_string();
+        settings.git.repository_path = settings_repo.to_string_lossy().to_string();
+        settings.review.worktree_dir = settings_dir
+            .path()
+            .join("review-trees")
+            .to_string_lossy()
+            .to_string();
+
+        let db = Arc::new(Database::new(&settings.database).await?);
+        db.migrate().await?;
+        let ctx = ReviewContext {
+            semaphore: Arc::new(Semaphore::new(1)),
+            db,
+            settings,
+            baseline_registry: Arc::new(BaselineRegistry::new(&settings_repo, None)?),
+            quota_manager: Arc::new(QuotaManager::new()),
+            target_review_count: 1,
+            provider: Arc::new(MockProvider),
+        };
+        let candidates = vec![BaselineResolution::CommitInRepo {
+            repo_url: source_repo.to_string_lossy().to_string(),
+            commit: base_sha.clone(),
+        }];
+        let diffs = vec![(
+            1,
+            1,
+            String::new(),
+            "Feature".to_string(),
+            "Test User <test@example.com>".to_string(),
+            1,
+            feature_sha.clone(),
+        )];
+
+        let (found, patch_commits, logs) =
+            Reviewer::prepare_baseline_worktree(&ctx, 1, &candidates, &diffs).await;
+
+        let Some((_, _, worktree)) = found else {
+            panic!("expected baseline worktree from source repo; logs: {logs}");
+        };
+        assert_eq!(patch_commits.get(&1), Some(&feature_sha));
+        worktree.remove().await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_skip_ignored_files() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let bin_path = temp_dir.path().join("mock_review");
+        std::fs::write(&bin_path, "#!/bin/sh\nexit 0")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755))?;
+        }
+
+        let mut settings = Settings::new()?;
+        settings.database.url = ":memory:".to_string();
+        settings.review.ignore_files = vec!["ignored.txt".to_string(), "ignore_dir/".to_string()];
+        settings.review.review_tool_override = Some(bin_path);
+
+        let db = Arc::new(Database::new(&settings.database).await?);
+        db.migrate().await?;
+        let quota_manager = Arc::new(QuotaManager::new());
+        let provider = Arc::new(MockProvider);
+
+        let ctx = ReviewContext {
+            semaphore: Arc::new(Semaphore::new(1)),
+            db: db.clone(),
+            settings: settings.clone(),
+            baseline_registry: Arc::new(BaselineRegistry::new(Path::new("."), None).unwrap()),
+            quota_manager,
+            target_review_count: 1,
+            provider,
+        };
+
+        // Create dummy patchset and patch in DB
+        let thread_id = db.create_thread("msg_id_1", "Subject", 1000).await?;
+
+        // Create messages for patches
+        db.create_message(
+            "msg_id_p1",
+            thread_id,
+            None,
+            "Author",
+            "Subject",
+            1000,
+            "Body",
+            "",
+            "",
+            None,
+            None,
+        )
+        .await?;
+        db.create_message(
+            "msg_id_p2",
+            thread_id,
+            None,
+            "Author",
+            "Subject",
+            1000,
+            "Body",
+            "",
+            "",
+            None,
+            None,
+        )
+        .await?;
+        db.create_message(
+            "msg_id_p3",
+            thread_id,
+            None,
+            "Author",
+            "Subject",
+            1000,
+            "Body",
+            "",
+            "",
+            None,
+            None,
+        )
+        .await?;
+
+        let ps_id = db
+            .create_patchset(
+                thread_id, None, "msg_id_1", "Subject", "Author", 1000, 1, 1, "", "", None, 1,
+                None, false, None, None,
+            )
+            .await?
+            .expect("Failed to create patchset");
+
+        // Case 1: Ignored file
+        let diff_ignored = "diff --git a/ignored.txt b/ignored.txt\nindex ...";
+        let p_id = db.create_patch(ps_id, "msg_id_p1", 1, diff_ignored).await?;
+
+        let result = Reviewer::process_patch_review(
+            &ctx,
+            ps_id,
+            p_id,
+            1,
+            "HEAD",
+            None,
+            &json!({}),
+            None,
+            None,
+            None,
+            diff_ignored,
+            None,
+        )
+        .await?;
+
+        // Should return Success (because it's skipped gracefully)
+        match result {
+            PatchResult::Success => {}
+            _ => panic!("Expected Success for skipped review"),
+        }
+
+        // Verify DB status
+        let mut rows = db
+            .conn
+            .query(
+                "SELECT status, result_description FROM reviews WHERE patch_id = ?",
+                libsql::params![p_id],
+            )
+            .await?;
+        let row = rows.next().await?.expect("No review found");
+        let status: String = row.get(0)?;
+        let description: String = row.get(1).unwrap_or_default();
+
+        assert_eq!(status, "Skipped");
+        assert!(description.contains("touches only ignored files"));
+
+        // Case 2: Ignored directory prefix
+        let diff_dir = "diff --git a/ignore_dir/subfile.c b/ignore_dir/subfile.c\n...";
+        let p_id_2 = db.create_patch(ps_id, "msg_id_p2", 2, diff_dir).await?;
+
+        let result = Reviewer::process_patch_review(
+            &ctx,
+            ps_id,
+            p_id_2,
+            2,
+            "HEAD",
+            None,
+            &json!({}),
+            None,
+            None,
+            None,
+            diff_dir,
+            None,
+        )
+        .await?;
+
+        match result {
+            PatchResult::Success => {}
+            _ => panic!("Expected Success for skipped review"),
+        }
+
+        let mut rows = db
+            .conn
+            .query(
+                "SELECT status FROM reviews WHERE patch_id = ?",
+                libsql::params![p_id_2],
+            )
+            .await?;
+        let row = rows.next().await?.expect("No review found");
+        let status: String = row.get(0)?;
+        assert_eq!(status, "Skipped");
+
+        // Case 3: Mixed (Ignored + Not Ignored) -> Should NOT skip
+        let diff_mixed = "diff --git a/ignored.txt b/ignored.txt\n...\ndiff --git a/src/main.rs b/src/main.rs\n...";
+        let p_id_3 = db.create_patch(ps_id, "msg_id_p3", 3, diff_mixed).await?;
+
+        let _result = Reviewer::process_patch_review(
+            &ctx,
+            ps_id,
+            p_id_3,
+            3,
+            "HEAD",
+            None,
+            &json!({}),
+            None,
+            None,
+            None,
+            diff_mixed,
+            None,
+        )
+        .await;
+
+        // Even if it fails to run tool, it shouldn't be "Skipped".
+        let mut rows = db
+            .conn
+            .query(
+                "SELECT status FROM reviews WHERE patch_id = ?",
+                libsql::params![p_id_3],
+            )
+            .await?;
+        // Review might be created (Pending/InReview) or not if process failed early (but create_review is called early in loop)
+        // Wait, loop calls create_review at start of loop.
+        // If run_review_tool fails (which it will), we get ReviewFailed.
+
+        if let Ok(Some(row)) = rows.next().await {
+            let status: String = row.get(0)?;
+            assert_ne!(status, "Skipped");
+        } else {
+            // It might fail before creating review?
+            // create_review is inside the loop.
+            // If run_review_tool fails to spawn (binary not found), it returns Err.
+            // process_patch_review handles Err by logging and retrying.
+            // If retries exhausted, it returns ReviewFailed.
+            // But it DOES create a review entry in each iteration.
+            // So we should find at least one review.
+        }
+
+        Ok(())
+    }
+
+    struct MockProviderWithUsage {
+        prompt_tokens: usize,
+        completion_tokens: usize,
+        cached_tokens: usize,
+    }
+
+    #[async_trait]
+    impl AiProvider for MockProviderWithUsage {
+        async fn generate_content(&self, _request: AiRequest) -> Result<AiResponse> {
+            Ok(AiResponse {
+                content: Some("Mocked AI response".to_string()),
+                thought: None,
+                thought_signature: None,
+                tool_calls: None,
+                usage: Some(crate::ai::AiUsage {
+                    prompt_tokens: self.prompt_tokens,
+                    completion_tokens: self.completion_tokens,
+                    total_tokens: self.prompt_tokens + self.completion_tokens,
+                    cached_tokens: Some(self.cached_tokens),
+                }),
+            })
+        }
+        fn estimate_tokens(&self, _request: &AiRequest) -> usize {
+            0
+        }
+        fn get_capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                model_name: "mock".to_string(),
+                context_window_size: 1000,
+            }
+        }
+    }
+
+    async fn run_two_request_mock(
+        mut settings: Settings,
+        provider: Arc<dyn AiProvider>,
+    ) -> Result<()> {
+        let temp_dir = tempdir()?;
+        let bin_path = temp_dir.path().join("mock_review");
+
+        // Mock binary: sends two consecutive AI requests then a final result.
+        let mock_script = r#"#!/bin/bash
+read -r input
+echo '{"type": "ai_request", "payload": {"messages": [{"role": "user", "content": "first"}], "temperature": 0.5}}'
+read -r ai_response
+echo '{"type": "ai_request", "payload": {"messages": [{"role": "user", "content": "second"}], "temperature": 0.5}}'
+read -r ai_response
+echo '{"patchset_id": 1, "patches": [{"index": 1, "status": "applied"}]}'
+"#;
+        std::fs::write(&bin_path, mock_script)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755))?;
+        }
+        settings.review.review_tool_override = Some(bin_path.clone());
+
+        let db = Arc::new(Database::new(&settings.database).await?);
+        db.migrate().await?;
+        let quota_manager = Arc::new(QuotaManager::new());
+
+        let thread_id = db.create_thread("msg_id_1", "Subject", 1000).await?;
+        db.create_message(
+            "msg_id_p1",
+            thread_id,
+            None,
+            "Author",
+            "Subject",
+            1000,
+            "Body",
+            "",
+            "",
+            None,
+            None,
+        )
+        .await?;
+        let ps_id = db
+            .create_patchset(
+                thread_id, None, "msg_id_1", "Subject", "Author", 1000, 1, 1, "", "", None, 1,
+                None, false, None, None,
+            )
+            .await?
+            .unwrap();
+        let p_id = db
+            .create_patch(ps_id, "msg_id_p1", 1, "diff --git a/foo.c b/foo.c\n+int x;")
+            .await?;
+        let review_id = db
+            .create_review(ps_id, Some(p_id), "mock", "mock", None, None)
+            .await?;
+
+        run_review_tool(
+            ps_id,
+            &json!({}),
+            &settings,
+            db,
+            "HEAD",
+            Some(1),
+            None,
+            quota_manager,
+            review_id,
+            None,
+            provider,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    #[tokio::test]
+    async fn test_token_budget_aborts_review() -> Result<()> {
+        let mut settings = Settings::new()?;
+        settings.database.url = ":memory:".to_string();
+        // Each turn: 800 uncached input + 100 output = 900 uncached total.
+        // Budget of 1000 allows turn 1 (cumulative 900) but aborts on turn 2 (cumulative 1800).
+        settings.review.max_total_tokens = 1000;
+        settings.review.max_total_output_tokens = 0; // disabled
+
+        let provider = Arc::new(MockProviderWithUsage {
+            prompt_tokens: 1000,
+            completion_tokens: 100,
+            cached_tokens: 200, // uncached input = 800
+        });
+
+        let err = run_two_request_mock(settings, provider)
+            .await
+            .expect_err("Expected token budget error");
+        assert!(
+            err.to_string().contains("Token budget exceeded"),
+            "unexpected error: {err}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_output_token_budget_aborts_review() -> Result<()> {
+        let mut settings = Settings::new()?;
+        settings.database.url = ":memory:".to_string();
+        settings.review.max_total_tokens = 0; // disabled
+        // Each turn produces 300 output tokens. Budget of 500 allows turn 1 but aborts on turn 2.
+        settings.review.max_total_output_tokens = 500;
+
+        let provider = Arc::new(MockProviderWithUsage {
+            prompt_tokens: 100,
+            completion_tokens: 300,
+            cached_tokens: 0,
+        });
+
+        let err = run_two_request_mock(settings, provider)
+            .await
+            .expect_err("Expected output token budget error");
+        assert!(
+            err.to_string().contains("Output token budget exceeded"),
+            "unexpected error: {err}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_queue_notifications_split_summary() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let policy_path = temp_dir.path().join("email_policy.toml");
+        std::fs::write(
+            &policy_path,
+            r#"
+            [defaults]
+            mute_all = false
+            reply_all = true
+            "#,
+        )?;
+
+        let mut settings = Settings::new()?;
+        settings.database.url = ":memory:".to_string();
+        settings.review.email_policy_path = policy_path.to_str().unwrap().to_string();
+        settings.smtp = Some(crate::settings::SmtpSettings {
+            server: "localhost".to_string(),
+            port: 25,
+            username: None,
+            password: None,
+            sender_address: "bot@sashiko.dev".to_string(),
+            reply_to: None,
+            dry_run: false, // We want 'Pending' status to be able to query it easily if needed, or just query it anyway.
+        });
+
+        let db = Arc::new(Database::new(&settings.database).await?);
+        db.migrate().await?;
+
+        let thread_id = db.create_thread("msg_id_1", "Subject", 1000).await?;
+        db.create_message(
+            "msg_id_p1",
+            thread_id,
+            None,
+            "Author <author@example.com>",
+            "Subject",
+            1000,
+            "Body with ---\nSigned-off-by: Author <author@example.com>",
+            "to@example.com",
+            "cc@example.com",
+            None,
+            None,
+        )
+        .await?;
+
+        let ps_id = db
+            .create_patchset(
+                thread_id, None, "msg_id_1", "Subject", "Author", 1000, 1, 1, "", "", None, 1,
+                None, false, None, None,
+            )
+            .await?
+            .unwrap();
+
+        let p_id_1 = db.create_patch(ps_id, "msg_id_p1", 1, "diff").await?;
+
+        let ctx = ReviewContext {
+            semaphore: Arc::new(Semaphore::new(1)),
+            db: db.clone(),
+            settings,
+            baseline_registry: Arc::new(
+                crate::baseline::BaselineRegistry::new(Path::new("."), None).unwrap(),
+            ),
+            quota_manager: Arc::new(QuotaManager::new()),
+            target_review_count: 1,
+            provider: Arc::new(MockProvider),
+        };
+
+        // Scenario 1: Mixed findings
+        let findings_mixed = vec![
+            json!({
+                "problem": "New High issue",
+                "severity": "High",
+                "preexisting": false
+            }),
+            json!({
+                "problem": "Preexisting Medium issue",
+                "severity": "Medium",
+                "preexisting": true
+            }),
+            json!({
+                "problem": "New Low issue",
+                "severity": "Low",
+                "preexisting": false
+            }),
+        ];
+
+        Reviewer::queue_notifications(
+            &ctx,
+            p_id_1,
+            "msg_id_p1",
+            "msg_id_1",
+            1, // index
+            "inline review content",
+            Some(&findings_mixed),
+            "summary",
+        )
+        .await?;
+
+        // Verify Scenario 1
+        let mut rows = db
+            .conn
+            .query(
+                "SELECT body FROM email_outbox WHERE patch_id = ?",
+                libsql::params![p_id_1],
+            )
+            .await?;
+        let row = rows.next().await?.expect("Expected email in outbox");
+        let body: String = row.get(0)?;
+        let expected_mixed_body = "\
+Thank you for your contribution! Sashiko AI review found 3 potential issue(s) to consider:
+
+New issues:
+- [High] New High issue
+- [Low] New Low issue
+
+Pre-existing issues:
+- [Medium] Preexisting Medium issue
+--
+
+inline review content\n\n-- \nSashiko AI review · https://sashiko.dev/#/patchset/msg_id_1?part=1";
+        assert_eq!(body, expected_mixed_body);
+
+        // Setup for Scenario 2: Only New
+        db.create_message(
+            "msg_id_p2",
+            thread_id,
+            None,
+            "Author <author@example.com>",
+            "Subject 2",
+            1000,
+            "Body 2",
+            "to@example.com",
+            "cc@example.com",
+            None,
+            None,
+        )
+        .await?;
+        let p_id_2 = db.create_patch(ps_id, "msg_id_p2", 2, "diff").await?;
+
+        let findings_new_only = vec![
+            json!({
+                "problem": "New High issue",
+                "severity": "High",
+                "preexisting": false
+            }),
+            json!({
+                "problem": "New Low issue",
+                "severity": "Low",
+                "preexisting": false
+            }),
+        ];
+
+        Reviewer::queue_notifications(
+            &ctx,
+            p_id_2,
+            "msg_id_p2",
+            "msg_id_1",
+            2, // index
+            "inline review content 2",
+            Some(&findings_new_only),
+            "summary",
+        )
+        .await?;
+
+        let mut rows = db
+            .conn
+            .query(
+                "SELECT body FROM email_outbox WHERE patch_id = ?",
+                libsql::params![p_id_2],
+            )
+            .await?;
+        let row = rows.next().await?.expect("Expected email in outbox");
+        let body: String = row.get(0)?;
+        let expected_new_only_body = "\
+Thank you for your contribution! Sashiko AI review found 2 potential issue(s) to consider:
+- [High] New High issue
+- [Low] New Low issue
+--
+
+inline review content 2\n\n-- \nSashiko AI review · https://sashiko.dev/#/patchset/msg_id_1?part=2";
+        assert_eq!(body, expected_new_only_body);
+
+        // Setup for Scenario 3: Only Pre-existing
+        db.create_message(
+            "msg_id_p3",
+            thread_id,
+            None,
+            "Author <author@example.com>",
+            "Subject 3",
+            1000,
+            "Body 3",
+            "to@example.com",
+            "cc@example.com",
+            None,
+            None,
+        )
+        .await?;
+        let p_id_3 = db.create_patch(ps_id, "msg_id_p3", 3, "diff").await?;
+
+        let findings_preexisting_only = vec![json!({
+            "problem": "Preexisting Medium issue",
+            "severity": "Medium",
+            "preexisting": true
+        })];
+
+        Reviewer::queue_notifications(
+            &ctx,
+            p_id_3,
+            "msg_id_p3",
+            "msg_id_1",
+            3, // index
+            "inline review content 3",
+            Some(&findings_preexisting_only),
+            "summary",
+        )
+        .await?;
+
+        let mut rows = db
+            .conn
+            .query(
+                "SELECT body FROM email_outbox WHERE patch_id = ?",
+                libsql::params![p_id_3],
+            )
+            .await?;
+        let row = rows.next().await?.expect("Expected email in outbox");
+        let body: String = row.get(0)?;
+        let expected_preexisting_only_body = "\
+Thank you for your contribution! Sashiko AI review found 1 potential issue(s) to consider:
+
+Pre-existing issues:
+- [Medium] Preexisting Medium issue
+--
+
+inline review content 3\n\n-- \nSashiko AI review · https://sashiko.dev/#/patchset/msg_id_1?part=3";
+        assert_eq!(body, expected_preexisting_only_body);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_is_hour_in_schedule_non_wrapping_window() {
+        let schedule = ScheduleSettings {
+            start_hour: 1,
+            end_hour: 8,
+            timezone: None,
+        };
+
+        assert!(is_hour_in_schedule(&schedule, 1));
+        assert!(is_hour_in_schedule(&schedule, 7));
+        assert!(!is_hour_in_schedule(&schedule, 0));
+        assert!(!is_hour_in_schedule(&schedule, 8));
+        assert!(!is_hour_in_schedule(&schedule, 23));
+    }
+
+    #[test]
+    fn test_is_hour_in_schedule_wrapping_window() {
+        let schedule = ScheduleSettings {
+            start_hour: 22,
+            end_hour: 6,
+            timezone: None,
+        };
+
+        assert!(is_hour_in_schedule(&schedule, 22));
+        assert!(is_hour_in_schedule(&schedule, 23));
+        assert!(is_hour_in_schedule(&schedule, 0));
+        assert!(is_hour_in_schedule(&schedule, 5));
+        assert!(!is_hour_in_schedule(&schedule, 6));
+        assert!(!is_hour_in_schedule(&schedule, 12));
+    }
+
+    #[test]
+    fn test_is_hour_in_schedule_start_equals_end_is_empty() {
+        let schedule = ScheduleSettings {
+            start_hour: 8,
+            end_hour: 8,
+            timezone: None,
+        };
+
+        for hour in 0..24 {
+            assert!(!is_hour_in_schedule(&schedule, hour));
+        }
+    }
+
+    #[test]
+    fn test_schedule_validate_valid() {
+        let schedule = ScheduleSettings {
+            start_hour: 1,
+            end_hour: 8,
+            timezone: Some("Asia/Shanghai".to_string()),
+        };
+        assert!(schedule.validate().is_ok());
+    }
+
+    #[test]
+    fn test_schedule_validate_invalid_hour() {
+        let schedule = ScheduleSettings {
+            start_hour: 25,
+            end_hour: 8,
+            timezone: None,
+        };
+        assert!(schedule.validate().is_err());
+    }
+
+    #[test]
+    fn test_schedule_validate_invalid_timezone() {
+        let schedule = ScheduleSettings {
+            start_hour: 1,
+            end_hour: 8,
+            timezone: Some("Invalid/Zone".to_string()),
+        };
+        assert!(schedule.validate().is_err());
+    }
+
+    #[test]
+    fn test_get_current_hour_with_timezone() {
+        let schedule = ScheduleSettings {
+            start_hour: 1,
+            end_hour: 8,
+            timezone: Some("Asia/Shanghai".to_string()),
+        };
+        let hour = get_current_hour(&schedule);
+        assert!(hour < 24);
+
+        let utc_schedule = ScheduleSettings {
+            start_hour: 1,
+            end_hour: 8,
+            timezone: Some("UTC".to_string()),
+        };
+        let utc_hour = get_current_hour(&utc_schedule);
+        assert_eq!(utc_hour, chrono::Utc::now().hour() as u8);
+    }
+}

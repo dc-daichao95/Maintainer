@@ -1,0 +1,13 @@
+{
+  "pull_interval_sec": 3600,
+  "max_retries": 3,
+  "max_history_days": 180,
+  "server_ip": "127.0.0.1",
+  "server_port": 18888,
+  "branches": [
+    "main",
+    "feature-x"
+  ],
+  "git_remote": "origin",
+  "git_branch": "main"
+}

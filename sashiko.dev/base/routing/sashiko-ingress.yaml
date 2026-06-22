@@ -1,0 +1,31 @@
+# Stable IPv4 Ingress
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sashiko-ingress
+  namespace: sashiko
+  annotations:
+    kubernetes.io/ingress.global-static-ip-name: "lb-ipv4-1"
+    networking.gke.io/managed-certificates: "sashiko-cert"
+spec:
+  defaultBackend:
+    service:
+      name: sashiko-service
+      port:
+        number: 8080
+---
+# Stable IPv6 Ingress
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sashiko-ingress-ipv6
+  namespace: sashiko
+  annotations:
+    kubernetes.io/ingress.global-static-ip-name: "lb-ipv6-1"
+    networking.gke.io/managed-certificates: "sashiko-cert"
+spec:
+  defaultBackend:
+    service:
+      name: sashiko-service
+      port:
+        number: 8080

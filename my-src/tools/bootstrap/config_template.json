@@ -1,0 +1,32 @@
+{
+  "linux_kernel_dir": "/path/to/your/local/linux/kernel",
+  "rust_install_cmds": [
+    "# install-cert.sh 中包含内网环境的 Rust 安装命令",
+    "./install-cert.sh"
+  ],
+  "app_config": {
+    "server": {
+      "port": 18888
+    },
+    "ai": {
+      "openai_key": "sk-your-actual-openai-api-key-here"
+    }
+  },
+  "headroom": {
+    "enabled": false,
+    "install_mode": "source-vendor",
+    "source_dir": "my-src/third_party/headroom/source",
+    "venv_dir": "my-src/.venv-headroom",
+    "wheelhouse_dir": "my-src/third_party/headroom/wheelhouse",
+    "python_executable": "python",
+    "host": "127.0.0.1",
+    "port": 8787,
+    "mode": "token",
+    "backend": "openrouter",
+    "telemetry": false,
+    "startup_timeout_secs": 20
+  },
+  "monitor": {
+    "branches": ["main", "feature-x"]
+  }
+}

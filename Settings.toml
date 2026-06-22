@@ -1,0 +1,115 @@
+log_level = "info"
+
+[database]
+url = "sashiko.db"
+token = ""
+
+[mailing_lists]
+track = ["linux-kernel"]
+
+[nntp]
+server = "nntp.lore.kernel.org"
+port = 119
+
+# [smtp]
+# **WARNING: BE VERY CAREFUL WHEN ENABLING EMAIL SENDING.**
+# Sashiko can easily generate and send a large volume of automated emails to
+# public mailing lists, potentially causing disruption or being marked as spam.
+# Ensure your filters and dry_run settings are correctly configured before use.
+# server = "smtp.example.com"
+# port = 587
+# username = "user@example.com"
+# password = "your_password"
+# sender_address = "sashiko@example.com"
+# dry_run = true
+
+[ai]
+provider = "openai-compatible"
+model = "deepseek-v4-pro"
+max_input_tokens = 128000
+max_interactions = 50
+temperature = 1.0
+api_timeout_secs = 300
+
+# To use Claude API directly:
+# provider = "claude"
+# model = "claude-sonnet-4-6"
+# max_input_tokens = 40000
+# max_interactions = 50
+
+# To use Claude Code CLI (fixed-cost subscription, no API key needed):
+# provider = "claude-cli"
+# model = "claude-sonnet-4-6"
+# max_input_tokens = 40000
+# max_interactions = 150
+
+# To use GitHub Copilot CLI (subscription auth, no API key needed):
+# provider = "copilot-cli"
+# model = "claude-sonnet-4.5"
+# max_input_tokens = 40000
+# max_interactions = 150
+
+# To use Claude via Google Cloud Vertex AI (requires --features vertex):
+# provider = "vertex"
+# model = "claude-sonnet-4-6"
+# max_input_tokens = 40000
+# max_interactions = 50
+
+# To use Kiro CLI (fixed-cost subscription, no API key needed):
+# provider = "kiro-cli"
+# model = "claude-opus-4.6"
+# max_input_tokens = 40000
+# max_interactions = 50
+
+[ai.openai_compat]
+base_url = "https://api.deepseek.com/chat/completions"
+context_window_size = 128000
+max_tokens = 8192
+streaming = true
+stream_idle_timeout_secs = 240
+
+[ai.claude]
+prompt_caching = true
+# thinking = "enabled"    # Enable extended thinking (or "adaptive" for Sonnet 4.6+)
+# effort = "high"         # Thinking effort: "low", "medium", "high"
+
+# [ai.claude_cli]
+# effort = "high"   # Thinking effort: "low", "medium", "high", "xhigh", "max"
+
+# [ai.vertex]
+# project_id = "my-gcp-project"  # Or set ANTHROPIC_VERTEX_PROJECT_ID env var
+# region = "us-east5"            # Or set CLOUD_ML_REGION env var (default: "us-east5")
+# prompt_caching = true
+
+# [ai.kiro_cli]
+# binary = "kiro-cli"
+# context_window_size = 200000
+
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[git]
+repository_path = "D:/AI_Coding/linux"
+
+# Track custom remotes and attempt to apply patches on their branches
+# [[git.custom_remotes]]
+# name = "remote-name"
+# url = "git://my-custom.com/remote"
+# check_all_branches = true
+# only_branches = []
+
+[review]
+concurrency = 20
+worktree_dir = "review_trees"
+timeout_seconds = 7200
+max_retries = 3
+ignore_files = ["MAINTAINERS", ".mailmap", ".gitignore", "LICENSES/"]
+
+# Schedule review processing to a specific time window (e.g. night-only).
+# When enabled, new patchsets stay Pending outside the window.
+# Set timezone to an IANA name (e.g. "Asia/Shanghai"); omit to use system local time.
+[review.schedule]
+start_hour = 1
+end_hour = 8
+timezone = "Asia/Shanghai"
