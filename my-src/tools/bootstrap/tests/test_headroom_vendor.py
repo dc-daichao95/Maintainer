@@ -147,7 +147,8 @@ def test_vendor_manager_requires_cargo(tmp_path):
         deploy.HeadroomVendorManager(runner=runner).prepare(config)
 
 
-def test_vendor_manager_builds_and_installs_from_source(tmp_path):
+def test_vendor_manager_builds_and_installs_from_source(tmp_path, monkeypatch):
+    monkeypatch.setattr(deploy, "get_active_env_prefix", lambda: None)
     source_dir = tmp_path / "headroom-source"
     make_source_tree(source_dir)
     venv_dir = tmp_path / "venv"
@@ -175,7 +176,8 @@ def test_vendor_manager_builds_and_installs_from_source(tmp_path):
     assert status.headroom_command == deploy.get_venv_headroom_command(str(venv_dir))
 
 
-def test_vendor_manager_uses_offline_wheelhouse_for_build_and_install(tmp_path):
+def test_vendor_manager_uses_offline_wheelhouse_for_build_and_install(tmp_path, monkeypatch):
+    monkeypatch.setattr(deploy, "get_active_env_prefix", lambda: None)
     source_dir = tmp_path / "headroom-source"
     make_source_tree(source_dir)
     venv_dir = tmp_path / "venv"
@@ -195,6 +197,43 @@ def test_vendor_manager_uses_offline_wheelhouse_for_build_and_install(tmp_path):
 
     assert ([deploy.get_venv_python(str(venv_dir)), "-m", "pip", "install", "--no-index", "--find-links", str(wheelhouse_dir), "maturin"], None) in runner.commands
     assert ([deploy.get_venv_python(str(venv_dir)), "-m", "pip", "wheel", ".", "--no-build-isolation", "--no-index", "--find-links", str(wheelhouse_dir), "--wheel-dir", str(wheelhouse_dir)], str(source_dir)) in runner.commands
+
+
+def test_vendor_manager_installs_into_active_conda_env_without_venv(tmp_path, monkeypatch):
+    env_prefix = str(tmp_path / "conda-env")
+    monkeypatch.setattr(deploy, "get_active_env_prefix", lambda: env_prefix)
+    source_dir = tmp_path / "headroom-source"
+    make_source_tree(source_dir)
+    venv_dir = tmp_path / "venv"
+    wheelhouse_dir = tmp_path / "wheelhouse"
+    config = deploy.HeadroomConfig(
+        enabled=True,
+        source_dir=str(source_dir),
+        venv_dir=str(venv_dir),
+        wheelhouse_dir=str(wheelhouse_dir),
+        python_executable="python",
+    )
+    runner = RecordingCommandRunner({
+        ("python", "--version"): "Python 3.10.13",
+        ("cargo", "--version"): "cargo 1.92.0",
+    })
+
+    status = deploy.HeadroomVendorManager(runner=runner).prepare(config)
+
+    venv_commands = [
+        cmd for cmd, _ in runner.commands
+        if len(cmd) >= 3 and cmd[1] == "-m" and cmd[2] == "venv"
+    ]
+    assert venv_commands == []
+    assert ["python", "-m", "pip", "install", "--no-index", "--find-links", str(wheelhouse_dir), "maturin"] in [
+        cmd for cmd, _ in runner.commands
+    ]
+    assert (["python", "-m", "pip", "wheel", ".", "--no-build-isolation", "--no-index", "--find-links", str(wheelhouse_dir), "--wheel-dir", str(wheelhouse_dir)], str(source_dir)) in runner.commands
+    assert ["python", "-m", "pip", "install", "--no-index", "--find-links", str(wheelhouse_dir), "headroom-ai[proxy]"] in [
+        cmd for cmd, _ in runner.commands
+    ]
+    assert status.venv_python == "python"
+    assert status.headroom_command == deploy.get_env_headroom_command(env_prefix)
 
 
 def test_config_template_declares_source_vendor_defaults():

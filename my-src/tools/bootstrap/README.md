@@ -47,7 +47,9 @@ python -m pytest tests/
 
 ## Headroom 上下文压缩代理集成
 
-部署工具支持可选的 Headroom 本地代理托管。默认集成方式为 `source-vendor`：从 `my-src/third_party/headroom/source/` 中的 Headroom 源码构建 wheel，安装到专用虚拟环境，再启动该虚拟环境中的 `headroom proxy`。脚本会先检查 `http://<host>:<port>/readyz`，如果代理未就绪则尝试启动代理；只有代理 ready 后，才会把 Sashiko 的 OpenAI-compatible provider 指向 Headroom。
+部署工具支持可选的 Headroom 本地代理托管。默认集成方式为 `source-vendor`：从 `my-src/third_party/headroom/source/` 中的 Headroom 源码构建 wheel，安装到目标 Python 环境，再启动该环境中的 `headroom proxy`。脚本会先检查 `http://<host>:<port>/readyz`，如果代理未就绪则尝试启动代理；只有代理 ready 后，才会把 Sashiko 的 OpenAI-compatible provider 指向 Headroom。
+
+> **conda 环境说明**：如果部署本身就运行在一个已激活的 conda 环境中（即检测到 `CONDA_PREFIX`），脚本不会再创建独立的 `venv`，而是直接把 Headroom 构建并安装进当前 conda 环境，`headroom` 命令解析为 `$CONDA_PREFIX/bin/headroom`。这样可以避免在 conda 中嵌套 venv 导致的 `ensurepip` 等启动错误。此时 `venv_dir` 配置会被忽略。
 
 ### 前置条件
 
@@ -82,7 +84,7 @@ python -m pytest tests/
 - `enabled`: 是否启用 Headroom 集成。默认 `false`，不影响现有部署。
 - `install_mode`: Headroom 安装模式。默认 `source-vendor`，从项目内源码构建安装。
 - `source_dir`: Headroom vendor 源码目录。
-- `venv_dir`: Headroom 专用 Python 虚拟环境目录。
+- `venv_dir`: Headroom 专用 Python 虚拟环境目录。**若部署运行在已激活的 conda 环境中，此项被忽略，Headroom 直接装入当前 conda 环境。**
 - `wheelhouse_dir`: Headroom wheel 构建与离线依赖目录。
 - `python_executable`: 用于创建 venv 和构建 wheel 的 Python，启用 source vendor 时必须为 3.10+。
 - `host` / `port`: Headroom 监听地址，默认 `127.0.0.1:8787`。

@@ -170,6 +170,23 @@ def get_venv_headroom_command(venv_dir):
         return os.path.join(venv_dir, "Scripts", "headroom.exe")
     return os.path.join(venv_dir, "bin", "headroom")
 
+def get_active_env_prefix():
+    """Return the active conda environment prefix, or None when not inside one.
+
+    Deployments on Linux often already run inside a conda environment. In that
+    case creating a separate venv is redundant and frequently breaks (e.g.
+    conda `ensurepip` failures), so we install Headroom into the active env.
+    """
+    prefix = os.environ.get("CONDA_PREFIX")
+    if prefix and prefix.strip():
+        return prefix
+    return None
+
+def get_env_headroom_command(env_prefix):
+    if os.name == "nt":
+        return os.path.join(env_prefix, "Scripts", "headroom.exe")
+    return os.path.join(env_prefix, "bin", "headroom")
+
 class SubprocessCommandRunner:
     def run(self, command, cwd=None):
         result = subprocess.run(
@@ -198,10 +215,19 @@ class HeadroomVendorManager:
             raise ExecutionError("Headroom source-vendor mode requires cargo on PATH")
 
         os.makedirs(config.wheelhouse_dir, exist_ok=True)
-        venv_python = get_venv_python(config.venv_dir)
-        self._run([config.python_executable, "-m", "venv", config.venv_dir])
+
+        # Reuse the active conda environment instead of nesting a redundant venv.
+        env_prefix = get_active_env_prefix()
+        if env_prefix:
+            build_python = config.python_executable
+            headroom_command = get_env_headroom_command(env_prefix)
+        else:
+            build_python = get_venv_python(config.venv_dir)
+            self._run([config.python_executable, "-m", "venv", config.venv_dir])
+            headroom_command = get_venv_headroom_command(config.venv_dir)
+
         self._run([
-            venv_python,
+            build_python,
             "-m",
             "pip",
             "install",
@@ -212,7 +238,7 @@ class HeadroomVendorManager:
         ])
         self._run(
             [
-                venv_python,
+                build_python,
                 "-m",
                 "pip",
                 "wheel",
@@ -228,7 +254,7 @@ class HeadroomVendorManager:
         )
         self._run(
             [
-                venv_python,
+                build_python,
                 "-m",
                 "pip",
                 "install",
@@ -241,8 +267,8 @@ class HeadroomVendorManager:
         return HeadroomBuildStatus(
             source_version=self._read_source_version(config.source_dir),
             wheel_path=config.wheelhouse_dir,
-            venv_python=venv_python,
-            headroom_command=get_venv_headroom_command(config.venv_dir),
+            venv_python=build_python,
+            headroom_command=headroom_command,
         )
 
     def _run(self, command, cwd=None):
