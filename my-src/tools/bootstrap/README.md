@@ -117,6 +117,29 @@ Sashiko 的 OpenAI-compatible client 会将该 base URL 规范化为 `/v1/chat/c
 - 端口被占用：修改 `headroom.port` 或停止占用端口的进程。
 - `/readyz` 超时：检查 Headroom 日志、上游 provider 凭据和网络连通性。
 
+### 离线环境准备：填充 wheelhouse
+
+`source-vendor` 模式以 `pip --no-index --find-links <wheelhouse>` 离线安装，要求 `wheelhouse_dir`
+预先备齐 `maturin` 及 Headroom `[proxy]` 的全部传递依赖 wheel。为此提供 `fill_wheelhouse.py`：
+在**能访问内网镜像的目标机**上运行一次即可填满 wheelhouse。
+
+```bash
+cd my-src/tools/bootstrap
+python fill_wheelhouse.py --index-url https://<内网镜像>/simple --trusted-host <镜像主机>
+# 之后照常离线部署（install_mode 保持 source-vendor）：
+python deploy.py --config config.json
+```
+
+参数：`--index-url` / `--extra-index-url` / `--trusted-host`（内网 http 或自签证书时需要）、
+`--source-dir` / `--wheelhouse-dir`（默认取 headroom 配置的对应路径）、`--python-executable`。
+
+> **wheel 平台绑定**：wheel 与操作系统/架构/Python 版本绑定，必须在与部署目标一致的机器上执行
+> 本脚本，否则离线安装会因找不到匹配 wheel 失败。
+
+> **Rust 侧离线依赖**：`deploy.py` 构建 Headroom 时会触发 `cargo build` 编译 `headroom._core`，
+> 离线环境还需保证 cargo 能取得 crate 依赖——配置内网 cargo 镜像（`~/.cargo/config.toml`）或预先
+> `cargo vendor`。本脚本只负责 Python/pip 侧的 wheelhouse。
+
 ### 边界说明
 
 本集成不修改 Sashiko 原生 `src/` 代码，不把 Headroom Rust crates 加入根 Cargo workspace。`my-src/third_party/headroom/source/` 是上游源码快照，默认不在本项目内直接修改；版本更新应通过替换快照并更新 `my-src/third_party/headroom/VENDOR.md` 完成。Headroom 作为代理运行，关闭集成只需将 `headroom.enabled` 改回 `false` 或恢复原有 LLM provider 配置。
