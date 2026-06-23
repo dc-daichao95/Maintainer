@@ -1,0 +1,34 @@
+# Headroom Linux 一键部署 —— 本地源码构建 + 常驻 proxy。
+#
+# 设计要点：
+#   - 镜像来自本地源码构建（build），绝不从远端 pull。
+#   - restart: unless-stopped，Docker 守护进程开机自启后自动拉起 proxy。
+#   - 监听 0.0.0.0:${HEADROOM_PORT}，局域网内其他机器可访问。
+#
+# 用法见 deploy/README.md，推荐通过 deploy/deploy-linux.sh 调用。
+
+services:
+  proxy:
+    build:
+      # 构建上下文指向本地 headroom 源码目录，使用其多阶段 Dockerfile。
+      context: ../headroom-main/headroom-main
+      dockerfile: Dockerfile
+    image: headroom:local
+    entrypoint: ["headroom", "proxy"]
+    working_dir: /workspace
+    restart: unless-stopped
+    environment:
+      HOME: /tmp/headroom-home
+      HEADROOM_HOST: 0.0.0.0
+      # Headroom 文件系统契约（issue #175）：把状态/配置解析到 bind-mount 的
+      # /tmp/headroom-home/.headroom 路径，保证容器重建后状态不丢。
+      HEADROOM_WORKSPACE_DIR: /tmp/headroom-home/.headroom
+      HEADROOM_CONFIG_DIR: /tmp/headroom-home/.headroom/config
+    ports:
+      - "${HEADROOM_PORT:-8787}:${HEADROOM_PORT:-8787}"
+    volumes:
+      # 持久化 headroom 状态/配置到宿主机 ~/.headroom。
+      # HEADROOM_HOST_HOME 由 deploy-linux.sh 自动导出（默认 $HOME）；
+      # 若手动 docker compose，请先 export HEADROOM_HOST_HOME=$HOME。
+      - ${HEADROOM_HOST_HOME:?run deploy-linux.sh or set HEADROOM_HOST_HOME}/.headroom:/tmp/headroom-home/.headroom
+    command: ["--host", "0.0.0.0", "--port", "${HEADROOM_PORT:-8787}"]
