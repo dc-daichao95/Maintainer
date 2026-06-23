@@ -6,6 +6,20 @@ tar，拷到离线机 `docker load` 后常驻运行。镜像已内置全部 Pyth
 
 适用：离线 Linux **x86_64**（镜像架构需与目标机一致）。
 
+## 已内置镜像分卷（可直接离线使用）
+
+仓库已内置 `ghcr.io/chopratejas/headroom:latest` 的镜像归档（gzip），因 GitHub 单文件
+100MB 上限切分为分卷置于 `image/`。离线机上先合并再加载，**无需联网、无需重新拉取**：
+
+```bash
+cd my-src/tools/bootstrap/offline-image/image
+./reassemble.sh                              # 合并 + sha256 校验 → headroom-offline.tar.gz
+docker load -i headroom-offline.tar.gz       # 或：../load_run.sh headroom-offline.tar.gz
+```
+
+> 若镜像需更新或换架构，用下面的 `pull_image_http.py` / `pull_save.sh` 重新产出并替换 `image/` 下分卷。
+> 重新切分可参考：`split -b 90m headroom-offline.tar.gz headroom-offline.tar.gz.part`（注意命名排序）。
+
 ## 步骤 1：联网机器上产出镜像 tar
 
 在任意「有 Docker + 能联网」的 x86_64 机器上：
