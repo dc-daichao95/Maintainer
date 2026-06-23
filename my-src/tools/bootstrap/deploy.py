@@ -98,8 +98,10 @@ def parse_headroom_config(config):
         raise ValidationError("headroom.port must be an integer between 1 and 65535")
     if not isinstance(startup_timeout_secs, int) or isinstance(startup_timeout_secs, bool):
         raise ValidationError("headroom.startup_timeout_secs must be an integer")
-    if install_mode not in ("source-vendor", "external-cli"):
-        raise ValidationError("headroom.install_mode must be either 'source-vendor' or 'external-cli'")
+    if install_mode not in ("source-vendor", "source-local", "external-cli"):
+        raise ValidationError(
+            "headroom.install_mode must be one of 'source-vendor', 'source-local', or 'external-cli'"
+        )
     for field_name, value in [
         ("install_mode", install_mode),
         ("source_dir", source_dir),
@@ -120,7 +122,7 @@ def parse_headroom_config(config):
         raise ValidationError("headroom.mode must be set when headroom is enabled")
     if enabled and startup_timeout_secs <= 0:
         raise ValidationError("headroom.startup_timeout_secs must be positive when headroom is enabled")
-    if enabled and install_mode == "source-vendor":
+    if enabled and install_mode in ("source-vendor", "source-local"):
         validate_headroom_source_dir(source_dir)
 
     return HeadroomConfig(
@@ -186,6 +188,37 @@ def get_env_headroom_command(env_prefix):
     if os.name == "nt":
         return os.path.join(env_prefix, "Scripts", "headroom.exe")
     return os.path.join(env_prefix, "bin", "headroom")
+
+def is_python_310_or_newer(version_output):
+    match = re.search(r"Python\s+(\d+)\.(\d+)", version_output)
+    if not match:
+        return False
+    return (int(match.group(1)), int(match.group(2))) >= (3, 10)
+
+def read_headroom_source_version(source_dir):
+    version_file = os.path.join(source_dir, "headroom", "_version.py")
+    if not os.path.exists(version_file):
+        return "unknown"
+    with open(version_file, "r", encoding="utf-8") as f:
+        content = f.read()
+    match = re.search(r"__version__\s*=\s*['\"]([^'\"]+)['\"]", content)
+    return match.group(1) if match else "unknown"
+
+def resolve_build_python_and_command(config):
+    """Resolve the Python interpreter to build with and the resulting headroom command.
+
+    Reuses an active conda environment when present (avoids nesting a redundant
+    venv); otherwise creates and targets the configured venv. Returns a tuple of
+    (build_python, headroom_command, needs_venv_creation).
+    """
+    env_prefix = get_active_env_prefix()
+    if env_prefix:
+        return config.python_executable, get_env_headroom_command(env_prefix), False
+    return (
+        get_venv_python(config.venv_dir),
+        get_venv_headroom_command(config.venv_dir),
+        True,
+    )
 
 class SubprocessCommandRunner:
     def run(self, command, cwd=None):
@@ -284,19 +317,60 @@ class HeadroomVendorManager:
             ) from e
 
     def _is_python_310_or_newer(self, version_output):
-        match = re.search(r"Python\s+(\d+)\.(\d+)", version_output)
-        if not match:
-            return False
-        return (int(match.group(1)), int(match.group(2))) >= (3, 10)
+        return is_python_310_or_newer(version_output)
 
     def _read_source_version(self, source_dir):
-        version_file = os.path.join(source_dir, "headroom", "_version.py")
-        if not os.path.exists(version_file):
-            return "unknown"
-        with open(version_file, "r", encoding="utf-8") as f:
-            content = f.read()
-        match = re.search(r"__version__\s*=\s*['\"]([^'\"]+)['\"]", content)
-        return match.group(1) if match else "unknown"
+        return read_headroom_source_version(source_dir)
+
+
+class HeadroomLocalInstaller:
+    """直接从本地源码 pip 安装 Headroom（免 wheelhouse）。
+
+    与 source-vendor 的区别：不使用 ``--no-index --find-links`` 离线 wheelhouse，
+    而是让 pip 正常解析依赖并经 maturin 构建，省去预先备齐 wheel 的步骤。前置仍需
+    Python 3.10+ 与 cargo（编译 Rust 扩展 ``headroom._core``）。
+    """
+
+    def __init__(self, runner=None):
+        self.runner = runner or SubprocessCommandRunner()
+
+    def prepare(self, config):
+        validate_headroom_source_dir(config.source_dir)
+        python_version = self._run([config.python_executable, "--version"]).strip()
+        if not is_python_310_or_newer(python_version):
+            raise ExecutionError(
+                f"Headroom source-local mode requires Python 3.10 or newer; got {python_version}"
+            )
+        cargo_cmd = get_cargo_path()
+        cargo_version = self._run([cargo_cmd, "--version"]).strip()
+        if not cargo_version:
+            raise ExecutionError("Headroom source-local mode requires cargo on PATH")
+
+        build_python, headroom_command, needs_venv = resolve_build_python_and_command(config)
+        if needs_venv:
+            self._run([config.python_executable, "-m", "venv", config.venv_dir])
+
+        # 免 wheelhouse：直接安装本地源码 + proxy extra，由 pip 正常解析依赖。
+        self._run([build_python, "-m", "pip", "install", f"{config.source_dir}[proxy]"])
+
+        return HeadroomBuildStatus(
+            source_version=read_headroom_source_version(config.source_dir),
+            wheel_path=config.source_dir,
+            venv_python=build_python,
+            headroom_command=headroom_command,
+        )
+
+    def _run(self, command, cwd=None):
+        try:
+            return self.runner.run(command, cwd=cwd)
+        except FileNotFoundError as e:
+            raise ExecutionError(
+                f"Headroom source-local command not found: {command[0]}"
+            ) from e
+        except subprocess.CalledProcessError as e:
+            raise ExecutionError(
+                f"Headroom source-local command failed: {' '.join(map(str, command))}"
+            ) from e
 
 def get_headroom_base_url(config):
     return f"http://{config.host}:{config.port}/v1"
@@ -746,6 +820,9 @@ def main(config_path, should_run=False):
         if headroom_config.enabled:
             if headroom_config.install_mode == "source-vendor":
                 build_status = HeadroomVendorManager().prepare(headroom_config)
+                headroom_config.headroom_command = build_status.headroom_command
+            elif headroom_config.install_mode == "source-local":
+                build_status = HeadroomLocalInstaller().prepare(headroom_config)
                 headroom_config.headroom_command = build_status.headroom_command
             headroom_status = ensure_headroom_running(headroom_config)
 
