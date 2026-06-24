@@ -72,6 +72,19 @@ docker restart headroom         # 重启
 docker rm -f headroom           # 停止并移除
 ```
 
+## 故障排查：容器 unhealthy
+
+`/readyz` 默认会探测**上游 LLM provider 是否可达**；在离线/气隙环境上游不可达 → `/readyz` 返回
+503 → 容器 `unhealthy`。`load_run.sh` 已默认注入 `HEADROOM_SKIP_UPSTREAM_CHECK=1` 跳过该探测，
+容器即可正常 healthy。若手动 `docker run`，请记得加上：
+
+```bash
+-e HEADROOM_SKIP_UPSTREAM_CHECK=1 \
+-e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1 -e HEADROOM_UPDATE_CHECK=off
+```
+
+> healthy ≠ 能用：Headroom 是转发代理，真正发请求时仍需上游 provider 可达 + 有效密钥。
+
 ## 说明与边界
 
 - **架构匹配**：`docker save` 出的镜像是 x86_64；离线机必须是 x86_64。aarch64 需在 arm64 机器上

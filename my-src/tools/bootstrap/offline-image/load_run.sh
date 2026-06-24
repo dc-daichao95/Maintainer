@@ -35,8 +35,17 @@ docker load -i "${TAR}"
 
 echo "==> (重新)启动常驻容器 ${NAME}，端口 ${PORT}"
 docker rm -f "${NAME}" >/dev/null 2>&1 || true
+# 离线必需环境变量：
+#   HEADROOM_SKIP_UPSTREAM_CHECK=1 —— /readyz 默认会探测上游 LLM，气隙环境探测失败会
+#     导致容器一直 unhealthy；跳过它才能正常就绪。
+#   HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE / HEADROOM_UPDATE_CHECK —— 阻止后台联网拉
+#     模型/查更新，避免离线下的噪声与超时（不影响就绪，仅图干净）。
 docker run -d --name "${NAME}" --restart unless-stopped \
   -p "${PORT}:${PORT}" \
+  -e HEADROOM_SKIP_UPSTREAM_CHECK=1 \
+  -e HF_HUB_OFFLINE=1 \
+  -e TRANSFORMERS_OFFLINE=1 \
+  -e HEADROOM_UPDATE_CHECK=off \
   "${IMAGE}" --host 0.0.0.0 --port "${PORT}"
 
 echo "==> 等待 /readyz 就绪（最多 ${HEALTH_TIMEOUT}s）"
