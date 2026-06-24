@@ -14,6 +14,7 @@
 #   HEALTH_TIMEOUT         健康检查最长等待秒数（默认 90）
 #   OPENAI_TARGET_API_URL  上游 OpenAI 兼容 LLM 的 base 地址（不带 /v1，Headroom 自动拼 /v1/chat/completions）
 #   HEADROOM_NETWORK       可选 docker 网络模式（如 host），用于容器需共享宿主机网络才能访问上游
+#   HEADROOM_CA_CERT       可选，上游 HTTPS 私有/自签 CA 证书的宿主机路径（解决 SSL 校验失败导致的 502）
 #
 # 以上参数可集中写入同目录的 headroom.env（key=value），本脚本会自动读取；见 headroom.env.example。
 
@@ -67,6 +68,16 @@ if [ -n "${OPENAI_TARGET_API_URL:-}" ]; then
   echo "    上游(OPENAI_TARGET_API_URL): ${OPENAI_TARGET_API_URL}"
 else
   echo "    警告：未配置 OPENAI_TARGET_API_URL，Headroom 将打默认 api.openai.com（离线会 502）。" >&2
+fi
+# 上游 HTTPS 私有/自签 CA：挂载证书并让 Headroom 追加信任（NODE_EXTRA_CA_CERTS 为追加语义，
+# 系统/公网 CA 仍保留）。否则连自签 HTTPS 网关会 TLS 校验失败 → 502。
+if [ -n "${HEADROOM_CA_CERT:-}" ]; then
+  if [ -f "${HEADROOM_CA_CERT}" ]; then
+    run_args+=(-v "${HEADROOM_CA_CERT}:/headroom-ca.crt:ro" -e NODE_EXTRA_CA_CERTS=/headroom-ca.crt)
+    echo "    CA 证书: ${HEADROOM_CA_CERT} -> /headroom-ca.crt"
+  else
+    echo "    警告：HEADROOM_CA_CERT 指向的文件不存在：${HEADROOM_CA_CERT}" >&2
+  fi
 fi
 run_args+=("${IMAGE}" --host 0.0.0.0 --port "${PORT}")
 docker "${run_args[@]}"

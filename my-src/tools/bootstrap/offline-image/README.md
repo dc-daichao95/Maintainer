@@ -102,6 +102,23 @@ docker rm -f headroom           # 停止并移除
 
 > healthy ≠ 能用：Headroom 是转发代理，真正发请求时仍需上游 provider 可达 + 有效密钥。
 
+## 故障排查：请求返回 502 `proxy_error`
+
+`502 proxy_error` 是 Headroom 转发上游**抛异常**时的兜底返回；真正原因看容器日志
+`docker logs headroom` 里的 `OpenAI request failed: <类型>: ...`。常见：
+
+- **`SSLError` / `self-signed certificate`**：上游是 HTTPS 且用内网自签证书 → 容器不信任。
+  在 `headroom.env` 设 `HEADROOM_CA_CERT=/path/to/ca-chain.pem`（证书提取见 `headroom.env.example`），
+  重新 `./load_run.sh` 即可。
+- **`ConnectError` / `timeout`**：容器网络到不了上游 → `headroom.env` 设 `HEADROOM_NETWORK=host`，或修 DNS/路由。
+- 容器内直接验证上游：
+  ```bash
+  docker exec headroom curl -sS -m 20 -i \
+    -H "Authorization: Bearer <key>" -H "Content-Type: application/json" \
+    -d '{"model":"<model>","messages":[{"role":"user","content":"ping"}]}' \
+    "$OPENAI_TARGET_API_URL/v1/chat/completions"
+  ```
+
 ## 说明与边界
 
 - **架构匹配**：`docker save` 出的镜像是 x86_64；离线机必须是 x86_64。aarch64 需在 arm64 机器上
