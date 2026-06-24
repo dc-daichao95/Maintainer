@@ -32,18 +32,35 @@ cd my-src/tools/bootstrap/offline-image
 
 产物 `headroom-offline.tar` 即可拷贝（U 盘/内网传输）到离线机。
 
-## 步骤 2：离线 Linux 上加载并常驻运行
+## 步骤 2：配置上游 LLM（必做）
+
+Headroom 是**透明代理**：Maintainer → Headroom →（压缩后）转发到**真实 LLM** → 原路返回。
+所以容器必须知道上游 LLM 地址，否则会默认打 `api.openai.com`（离线 → 502）。
+
+把参数写进配置文件 `headroom.env`（被 `load_run.sh` 自动读取）：
 
 ```bash
 cd my-src/tools/bootstrap/offline-image
-./load_run.sh headroom-offline.tar
-# 自定义端口：HEADROOM_PORT=9000 ./load_run.sh headroom-offline.tar
+cp headroom.env.example headroom.env
+# 编辑 headroom.env，至少设置 OPENAI_TARGET_API_URL（不带 /v1）：
+#   OPENAI_TARGET_API_URL=http://10.0.0.5:8000
+#   # 若容器默认网络访问不到上游，再设 HEADROOM_NETWORK=host
 ```
 
-脚本会 `docker load` 镜像、以 `--restart unless-stopped` 启动 proxy（监听 `0.0.0.0:8787`）、
-并轮询 `/readyz` 确认就绪。开机随 Docker 守护进程自动拉起。
+- `OPENAI_TARGET_API_URL` 填 **Maintainer 接入 Headroom 之前原本直连的那台 LLM**（base，不带 `/v1`）。
+- `headroom.env` 已被 `.gitignore`，含内网地址不会入库。
 
-## 步骤 3：让 deploy.py 对接已运行的容器
+## 步骤 3：离线 Linux 上加载并常驻运行
+
+```bash
+./load_run.sh headroom-offline.tar
+# 或先合并分卷：image/reassemble.sh 后 ./load_run.sh image/headroom-offline.tar.gz
+```
+
+脚本会读取 `headroom.env`、`docker load` 镜像、以 `--restart unless-stopped` 启动 proxy
+（注入 `OPENAI_TARGET_API_URL` 及离线必需变量）、并轮询 `/readyz` 确认就绪。开机自启。
+
+## 步骤 4：让 deploy.py 对接已运行的容器
 
 容器已经在跑 proxy，所以 `deploy.py` **无需再本地构建/安装** Headroom——用 `external-cli`
 模式让它探测到就绪的代理并把 Sashiko 的 provider 指过去。`config.json`：

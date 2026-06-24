@@ -1,0 +1,6 @@
+# 站点本地配置（含内网上游地址），不入库；以 headroom.env.example 为模板自行创建。
+headroom.env
+
+# 合并产物与中间文件
+headroom-offline.tar
+headroom-offline.tar.gz
